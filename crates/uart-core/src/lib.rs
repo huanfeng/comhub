@@ -2,5 +2,8 @@
 
 pub mod buffer;
 pub mod config;
+pub mod devices;
 pub mod logfile;
+pub mod port;
+pub mod service;
 pub mod text;
