@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+ureq = { version = "3", default-features = false }
