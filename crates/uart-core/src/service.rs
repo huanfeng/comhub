@@ -10,7 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{Config, PortConfig};
 use crate::port::{PortHub, PortSnapshot};
-use crate::terminal;
+use crate::{http, terminal};
 
 /// 通知外部（例如 GUI）刷新显示。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,13 +25,14 @@ type EventSink = Arc<dyn Fn(ServiceEvent) + Send + Sync>;
 
 struct PortEntry {
     hub: Arc<PortHub>,
-    tasks: Vec<JoinHandle<()>>,
+    terminal: JoinHandle<()>,
 }
 
 pub struct Service {
     config: Mutex<Config>,
     config_path: PathBuf,
     ports: Mutex<BTreeMap<String, PortEntry>>,
+    http: Mutex<Option<JoinHandle<()>>>,
     on_event: EventSink,
 }
 
@@ -43,14 +44,14 @@ impl Service {
         on_event: impl Fn(ServiceEvent) + Send + Sync + 'static,
     ) -> Result<Arc<Self>> {
         config.validate()?;
-        warn_if_exposed(&config);
         let service = Arc::new(Self {
-            config: Mutex::new(Config::default()),
+            config: Mutex::new(config.clone()),
             config_path: config_path.to_path_buf(),
             ports: Mutex::new(BTreeMap::new()),
+            http: Mutex::new(None),
             on_event: Arc::new(on_event),
         });
-        service.apply(config);
+        service.apply(config, true);
         Ok(service)
     }
 
@@ -79,19 +80,29 @@ impl Service {
     }
 
     /// 应用新配置：配置没变的串口保持运行（终端连接不断），其余的停止或新建。
-    pub fn reload(&self, config: Config) -> Result<()> {
+    /// 需要在 tokio 运行时中调用。
+    pub fn reload(self: &Arc<Self>, config: Config) -> Result<()> {
         config.validate()?;
-        self.apply(config);
+        let old = std::mem::replace(&mut *self.config.lock().unwrap(), config.clone());
+        self.apply(config, old.server != self.config().server);
         (self.on_event)(ServiceEvent::PortsReloaded);
         Ok(())
     }
 
-    fn apply(&self, config: Config) {
-        let old = std::mem::replace(&mut *self.config.lock().unwrap(), config.clone());
-        let server_changed = old.server != config.server;
-        let log_root = config.log_dir(&self.config_path);
+    fn apply(self: &Arc<Self>, config: Config, server_changed: bool) {
+        if server_changed {
+            warn_if_exposed(&config);
+            let task = tokio::spawn(http::serve(
+                self.clone(),
+                config.server.bind.clone(),
+                config.server.http_port,
+            ));
+            if let Some(old) = self.http.lock().unwrap().replace(task) {
+                old.abort();
+            }
+        }
 
-        let mut ports = self.ports.lock().unwrap();
+        let log_root = config.log_dir(&self.config_path);
         let wanted: BTreeMap<String, PortConfig> = config
             .ports
             .iter()
@@ -99,6 +110,7 @@ impl Service {
             .map(|p| (p.name.clone(), p.clone()))
             .collect();
 
+        let mut ports = self.ports.lock().unwrap();
         let stale: Vec<String> = ports
             .iter()
             .filter(|(name, entry)| {
@@ -120,17 +132,16 @@ impl Service {
             let hub = PortHub::start(port_config, config.server.buffer_lines, &log_root, move |n| {
                 on_event(ServiceEvent::PortChanged(n.to_string()))
             });
-            let tasks = self.spawn_port_tasks(&config, &hub);
-            ports.insert(name, PortEntry { hub, tasks });
+            let terminal = tokio::spawn(terminal::serve(hub.clone(), config.server.bind.clone()));
+            ports.insert(name, PortEntry { hub, terminal });
         }
     }
 
-    fn spawn_port_tasks(&self, config: &Config, hub: &Arc<PortHub>) -> Vec<JoinHandle<()>> {
-        vec![tokio::spawn(terminal::serve(hub.clone(), config.server.bind.clone()))]
-    }
-
-    /// 停止所有串口。
+    /// 停止所有串口和 HTTP 服务。
     pub fn shutdown(&self) {
+        if let Some(task) = self.http.lock().unwrap().take() {
+            task.abort();
+        }
         let entries = std::mem::take(&mut *self.ports.lock().unwrap());
         for entry in entries.into_values() {
             stop_entry(entry);
@@ -139,13 +150,11 @@ impl Service {
 }
 
 fn stop_entry(entry: PortEntry) {
-    for task in &entry.tasks {
-        task.abort();
-    }
+    entry.terminal.abort();
     entry.hub.stop();
 }
 
-/// 对外监听且没有设置 token 时给出提醒：局域网内任何人都可以读写串口。
+/// 对外监听时提醒当前的访问控制情况。
 fn warn_if_exposed(config: &Config) {
     let loopback = config
         .server
@@ -153,10 +162,18 @@ fn warn_if_exposed(config: &Config) {
         .parse::<IpAddr>()
         .map(|ip| ip.is_loopback())
         .unwrap_or(false);
-    if !loopback && config.server.token.is_none() {
+    if loopback {
+        return;
+    }
+    if config.server.token.is_none() {
         tracing::warn!(
             bind = %config.server.bind,
             "服务对局域网开放且未设置 token，任何能访问本机的设备都可以读写串口"
+        );
+    } else {
+        tracing::warn!(
+            bind = %config.server.bind,
+            "token 只保护 HTTP 接口；终端端口（Telnet/Raw）不做认证，局域网内可以直接连接"
         );
     }
 }

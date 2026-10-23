@@ -2,6 +2,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -10,6 +11,9 @@ use tokio::sync::mpsc;
 
 use crate::config::{Encoding, TerminalMode};
 use crate::port::{PortHub, PortState, TermEvent};
+
+/// 监听端口失败时的重试次数（每次间隔 300ms）。
+const BIND_RETRIES: u32 = 10;
 
 const IAC: u8 = 255;
 const DONT: u8 = 254;
@@ -30,11 +34,20 @@ const NEGOTIATION: [u8; 12] = [
 
 pub async fn serve(hub: Arc<PortHub>, bind: String) {
     let addr = format!("{bind}:{}", hub.config().tcp_port);
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!(port = %hub.name(), "终端服务监听 {addr} 失败: {e}");
-            return;
+    // 重新加载配置时，旧的监听任务刚被取消，端口可能还没释放，所以重试几次。
+    let mut attempt = 0;
+    let listener = loop {
+        match TcpListener::bind(&addr).await {
+            Ok(l) => break l,
+            Err(e) if attempt < BIND_RETRIES => {
+                attempt += 1;
+                tracing::debug!(port = %hub.name(), "监听 {addr} 失败，稍后重试: {e}");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Err(e) => {
+                tracing::error!(port = %hub.name(), "终端服务监听 {addr} 失败: {e}");
+                return;
+            }
         }
     };
     tracing::info!(port = %hub.name(), "终端服务监听 {addr}（{:?}）", hub.config().mode);
@@ -69,7 +82,7 @@ async fn handle_client(hub: Arc<PortHub>, stream: TcpStream, peer: SocketAddr) {
     }
 
     // 协商回复也要经由发送任务写出，保证和数据不交错。
-    let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let (reply_tx, mut reply_rx) = mpsc::channel::<Vec<u8>>(64);
     let name = hub.name().to_string();
     let mut outbound = tokio::spawn(async move {
         loop {
@@ -104,9 +117,11 @@ async fn handle_client(hub: Arc<PortHub>, stream: TcpStream, peer: SocketAddr) {
 
     let mut parser = TelnetParser::default();
     let mut buf = vec![0u8; 4096];
+    let mut closed = hub.closed();
     loop {
         tokio::select! {
             _ = &mut outbound => break,
+            _ = closed.wait_for(|c| *c) => break,
             read = reader.read(&mut buf) => {
                 let n = match read {
                     Ok(0) | Err(_) => break,
@@ -115,8 +130,10 @@ async fn handle_client(hub: Arc<PortHub>, stream: TcpStream, peer: SocketAddr) {
                 if telnet {
                     let (data, replies) = parser.feed(&buf[..n]);
                     hub.write(data);
-                    if !replies.is_empty() {
-                        let _ = reply_tx.send(replies);
+                    // 正常客户端只在连接开始时协商几次；回复积压说明对端不读数据，直接断开。
+                    if !replies.is_empty() && reply_tx.try_send(replies).is_err() {
+                        tracing::warn!(port = %hub.name(), "终端 {peer} 协商回复积压，断开连接");
+                        break;
                     }
                 } else {
                     hub.write(&buf[..n]);

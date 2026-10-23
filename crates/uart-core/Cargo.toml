@@ -18,6 +18,8 @@ encoding_rs = "0.8"
 regex = "1"
 bytes = "1"
 dirs = "6"
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "query"] }
+futures-util = { version = "0.3", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"

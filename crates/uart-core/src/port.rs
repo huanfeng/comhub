@@ -12,7 +12,7 @@ use bytes::Bytes;
 use chrono::Local;
 use serde::Serialize;
 use serialport::SerialPort;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 use crate::buffer::{Direction, LogBuffer, LogLine};
 use crate::config::{PortConfig, TerminalMode};
@@ -71,6 +71,8 @@ pub struct PortHub {
     rx_bytes: AtomicU64,
     tx_bytes: AtomicU64,
     stop: AtomicBool,
+    /// 停止时置为 true，让终端连接和 HTTP 流随之结束。
+    closed: watch::Sender<bool>,
     on_change: Box<dyn Fn(&str) + Send + Sync>,
     thread: Mutex<Option<JoinHandle<()>>>,
 }
@@ -94,6 +96,7 @@ impl PortHub {
             rx_bytes: AtomicU64::new(0),
             tx_bytes: AtomicU64::new(0),
             stop: AtomicBool::new(false),
+            closed: watch::channel(false).0,
             on_change: Box::new(on_change),
             thread: Mutex::new(None),
             config,
@@ -117,6 +120,7 @@ impl PortHub {
     /// 停止 IO 线程并关闭串口，阻塞到线程退出。
     pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
+        self.closed.send_replace(true);
         if let Some(handle) = self.thread.lock().unwrap().take() {
             let _ = handle.join();
         }
@@ -154,6 +158,11 @@ impl PortHub {
         if !data.is_empty() {
             let _ = self.write_tx.send(data);
         }
+    }
+
+    /// 串口停止（被删除或配置变化）时变为 true。
+    pub fn closed(&self) -> watch::Receiver<bool> {
+        self.closed.subscribe()
     }
 
     pub fn subscribe_terminal(&self) -> broadcast::Receiver<TermEvent> {
