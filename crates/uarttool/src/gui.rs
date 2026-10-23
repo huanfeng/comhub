@@ -386,6 +386,7 @@ fn disabled_row(p: &PortConfig) -> Vec<String> {
         format!("{} {}", p.tcp_port, mode_name(p.mode)),
         "-".into(),
         "-".into(),
+        "-".into(),
     ]
 }
 
@@ -700,5 +701,36 @@ impl Confirm {
             Element::label_signal(self.message).width_match(),
             footer,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rows_have_same_width() {
+        let p = PortConfig {
+            name: "x".into(),
+            serial_number: None,
+            com: Some("COM1".into()),
+            baud: 115_200,
+            tcp_port: 7001,
+            mode: TerminalMode::Telnet,
+            encoding: Encoding::Utf8,
+            enabled: false,
+        };
+        let s = PortSnapshot {
+            name: "x".into(),
+            state: PortState::Waiting,
+            baud: 115_200,
+            tcp_port: 7001,
+            mode: TerminalMode::Telnet,
+            clients: 0,
+            last_seq: 0,
+            rx_bytes: 0,
+            tx_bytes: 0,
+        };
+        assert_eq!(snapshot_row(&s).len(), disabled_row(&p).len());
     }
 }

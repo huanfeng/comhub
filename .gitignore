@@ -2,4 +2,4 @@
 *.log
 .remember/
 .omc/
-.claude/settings.local.json
+.claude/
