@@ -18,7 +18,7 @@ Claude Code 会在需要查看串口日志时自动加载。
 - `uartctl list` 查看设备及状态
 - `uartctl tail <name> -n 200` 最近日志；`uartctl log <name> --since <seq>` 增量读取
 - `uartctl grep <name> "(?i)error"` 搜索
-- `uartctl send <name> "<cmd>" --expect "<正则>" --timeout 10` 发命令并等待结果（超时退出码 2）
+- `uartctl send <name> "<cmd>" --expect "<正则>" --timeout 10` 发命令并等待结果（超时退出码 3，只匹配设备输出）
 - `uartctl wait <name> "<正则>" --timeout 60` 等待某条日志
 完整说明见 `uartctl --help` 和 `uartctl doc`。
 ```

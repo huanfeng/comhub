@@ -27,7 +27,9 @@ uarttool 把本机串口共享到网络上。通过这个接口可以读取设�
 | POST | `/ports/{name}/send?expect=<regex>&timeout=5&eol=crlf` | 请求体发给设备；带 expect 时等待匹配行并返回期间的日志 |
 
 - `eol`：在请求体末尾追加的换行，可选 `crlf`（默认）、`cr`、`lf`、`none`。
-- `wait` 和带 `expect` 的 `send` 超时时返回 HTTP 408，响应体仍是期间收到的日志。
+- `wait` 和带 `expect` 的 `send` 默认只用设备输出（RX 行）匹配，加 `dir=any` 让 TX/SYS 行也参与。
+  超时返回 HTTP 408，串口被停止返回 503，响应体仍是期间收到的日志。
+- `log` 的游标之后若有行已被挤出内存缓冲，开头会有一行 `-- gap: ...` 提示，完整内容在日志文件中。
 - 正则语法是 Rust regex，例如 `(?i)error|panic`。参数需要 URL 编码（curl 可用 `-G --data-urlencode`）。
 
 ## 示例

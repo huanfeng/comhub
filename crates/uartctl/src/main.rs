@@ -13,7 +13,7 @@ const AFTER_HELP: &str = "\
 日志行格式：
   2026-10-23 14:57:01.123 [RX] 设备输出      [TX] 发给设备的数据      [SYS] 服务事件
 
-退出码：0 成功；1 出错；2 wait/send --expect 超时（期间收到的日志仍会输出）
+退出码：0 成功；1 出错；2 参数错误；3 wait/send --expect 超时（期间收到的日志仍会输出）
 
 示例：
   uartctl list                                      查看有哪些串口
@@ -78,8 +78,11 @@ enum Command {
         name: String,
         pattern: String,
         /// 超时秒数
-        #[arg(long, default_value_t = 30.0)]
+        #[arg(long, default_value_t = 30.0, value_parser = parse_timeout)]
         timeout: f64,
+        /// 让 TX/SYS 行也参与匹配（默认只匹配设备输出 RX）
+        #[arg(long)]
+        any_dir: bool,
     },
     /// 持续输出新日志
     Follow { name: String },
@@ -91,8 +94,11 @@ enum Command {
         #[arg(long)]
         expect: Option<String>,
         /// 等待 --expect 的超时秒数
-        #[arg(long, default_value_t = 5.0)]
+        #[arg(long, default_value_t = 5.0, value_parser = parse_timeout)]
         timeout: f64,
+        /// 让 TX/SYS 行也参与 --expect 匹配（默认只匹配设备输出 RX）
+        #[arg(long)]
+        any_dir: bool,
         /// 末尾追加的换行：crlf、cr、lf、none
         #[arg(long, default_value = "crlf")]
         eol: String,
@@ -141,14 +147,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
                 .query("pattern", pattern)
                 .query("limit", limit.to_string()),
         ),
-        Command::Wait { name, pattern, timeout } => client.print(
+        Command::Wait { name, pattern, timeout, any_dir } => client.print(
             client
                 .get(&port_path(&name, "wait"), Some(timeout + REQUEST_SLACK))
                 .query("pattern", pattern)
-                .query("timeout", timeout.to_string()),
+                .query("timeout", timeout.to_string())
+                .query("dir", dir_param(any_dir)),
         ),
         Command::Follow { name } => client.follow(&name),
-        Command::Send { name, text, expect, timeout, eol, escape } => {
+        Command::Send { name, text, expect, timeout, eol, escape, any_dir } => {
             let data = if escape { unescape(&text)? } else { text.into_bytes() };
             let mut request = client
                 .post(&port_path(&name, "send"), Some(timeout + REQUEST_SLACK))
@@ -156,10 +163,27 @@ fn run(cli: Cli) -> Result<ExitCode> {
             if let Some(expect) = expect {
                 request = request
                     .query("expect", expect)
-                    .query("timeout", timeout.to_string());
+                    .query("timeout", timeout.to_string())
+                    .query("dir", dir_param(any_dir));
             }
             client.finish(request.send(&data[..]))
         }
+    }
+}
+
+fn dir_param(any_dir: bool) -> &'static str {
+    if any_dir {
+        "any"
+    } else {
+        "rx"
+    }
+}
+
+/// 超时秒数：有限的非负数，上限交给服务端。
+fn parse_timeout(s: &str) -> std::result::Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(t) if t.is_finite() && t >= 0.0 => Ok(t),
+        _ => Err(format!("`{s}` 不是有效的秒数")),
     }
 }
 
@@ -227,7 +251,7 @@ impl Client {
             }
             408 => {
                 print!("{body}");
-                Ok(ExitCode::from(2))
+                Ok(ExitCode::from(3))
             }
             _ => bail!("HTTP {status}: {}", body.trim_end().trim_start_matches("错误: ")),
         }
