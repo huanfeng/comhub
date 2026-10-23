@@ -80,6 +80,19 @@ impl LogBuffer {
         line
     }
 
+    /// 修改容量；变小时丢弃最旧的行。
+    pub fn set_capacity(&mut self, capacity: usize) {
+        self.capacity = capacity.max(1);
+        while self.lines.len() > self.capacity {
+            self.lines.pop_front();
+        }
+    }
+
+    /// 缓冲中最早一行的 seq；没有数据时为 `None`。
+    pub fn first_seq(&self) -> Option<u64> {
+        self.lines.front().map(|l| l.seq)
+    }
+
     /// 最新一行的 seq；还没有数据时为 0。
     pub fn last_seq(&self) -> u64 {
         self.next_seq - 1
@@ -157,6 +170,15 @@ mod tests {
     fn since_from_future_cursor_restarts() {
         let buf = buffer_with(3, 10);
         assert_eq!(seqs(&buf.since(999, 100)), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn shrinking_capacity_drops_oldest() {
+        let mut buf = buffer_with(5, 10);
+        buf.set_capacity(2);
+        assert_eq!(buf.first_seq(), Some(4));
+        buf.push(Local::now(), Direction::Rx, "x".into());
+        assert_eq!(seqs(&buf.tail(10)), vec![5, 6]);
     }
 
     #[test]

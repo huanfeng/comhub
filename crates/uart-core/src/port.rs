@@ -26,6 +26,10 @@ const READ_TIMEOUT: Duration = Duration::from_millis(20);
 const SCAN_INTERVAL: Duration = Duration::from_secs(1);
 /// 已连接时，多久确认一次设备还在（有些驱动在拔出后读操作只是超时，不报错）。
 const PRESENCE_CHECK_INTERVAL: Duration = Duration::from_secs(3);
+/// 等待写出的数据上限；超过后暂不从队列取新数据。
+const MAX_PENDING_WRITE: usize = 64 * 1024;
+/// 设备未连接时"丢弃写入"提示的最小间隔。
+const DROP_NOTICE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// 推送给终端连接的事件。
 #[derive(Debug, Clone)]
@@ -63,7 +67,7 @@ pub struct PortSnapshot {
 pub struct PortHub {
     config: PortConfig,
     state: Mutex<PortState>,
-    buffer: Mutex<LogBuffer>,
+    buffer: Arc<Mutex<LogBuffer>>,
     term_tx: broadcast::Sender<TermEvent>,
     line_tx: broadcast::Sender<LogLine>,
     write_tx: mpsc::Sender<Vec<u8>>,
@@ -77,18 +81,35 @@ pub struct PortHub {
     thread: Mutex<Option<JoinHandle<()>>>,
 }
 
+/// 启动一个串口所需的、来自上一代同名串口的东西。
+#[derive(Default)]
+pub struct Handover {
+    /// 沿用旧的环形缓冲：seq 继续递增，调用方手里的游标不会失效。
+    pub buffer: Option<Arc<Mutex<LogBuffer>>>,
+    /// 旧的 IO 线程；新线程先等它关闭串口。
+    pub predecessor: Option<JoinHandle<()>>,
+}
+
 impl PortHub {
     /// 创建并启动 IO 线程。`on_change` 在状态或客户端数量变化时调用，参数是串口别名。
     pub fn start(
         config: PortConfig,
         buffer_lines: usize,
         log_root: &Path,
+        handover: Handover,
         on_change: impl Fn(&str) + Send + Sync + 'static,
     ) -> Arc<Self> {
         let (write_tx, write_rx) = mpsc::channel();
+        let buffer = match handover.buffer {
+            Some(buffer) => {
+                buffer.lock().unwrap().set_capacity(buffer_lines);
+                buffer
+            }
+            None => Arc::new(Mutex::new(LogBuffer::new(buffer_lines))),
+        };
         let hub = Arc::new(Self {
             state: Mutex::new(PortState::Waiting),
-            buffer: Mutex::new(LogBuffer::new(buffer_lines)),
+            buffer,
             term_tx: broadcast::channel(1024).0,
             line_tx: broadcast::channel(4096).0,
             write_tx,
@@ -108,6 +129,9 @@ impl PortHub {
             log,
             rx: LineSplitter::new(SplitMode::Rx, hub.config.encoding),
             tx: LineSplitter::new(SplitMode::Tx, hub.config.encoding),
+            predecessor: handover.predecessor,
+            dropped: 0,
+            last_drop_notice: None,
         };
         let handle = std::thread::Builder::new()
             .name(format!("port-{}", hub.config.name))
@@ -117,13 +141,26 @@ impl PortHub {
         hub
     }
 
-    /// 停止 IO 线程并关闭串口，阻塞到线程退出。
-    pub fn stop(&self) {
+    /// 通知 IO 线程停止并关闭终端连接，不等待；返回线程句柄，由调用方决定是否等待。
+    ///
+    /// IO 线程可能正卡在打开串口或枚举设备上（蓝牙串口可能要十几秒），
+    /// 所以不要在 UI 线程或持有锁时等待它。
+    pub fn request_stop(&self) -> Option<JoinHandle<()>> {
         self.stop.store(true, Ordering::SeqCst);
         self.closed.send_replace(true);
-        if let Some(handle) = self.thread.lock().unwrap().take() {
+        self.thread.lock().unwrap().take()
+    }
+
+    /// 停止并等待 IO 线程退出（程序退出时使用）。
+    pub fn stop(&self) {
+        if let Some(handle) = self.request_stop() {
             let _ = handle.join();
         }
+    }
+
+    /// 环形缓冲的句柄，同名串口重建时交给新的 hub。
+    pub fn buffer_handle(&self) -> Arc<Mutex<LogBuffer>> {
+        self.buffer.clone()
     }
 
     pub fn config(&self) -> &PortConfig {
@@ -178,6 +215,10 @@ impl PortHub {
         f(&self.buffer.lock().unwrap())
     }
 
+    pub fn with_buffer_mut<R>(&self, f: impl FnOnce(&mut LogBuffer) -> R) -> R {
+        f(&mut self.buffer.lock().unwrap())
+    }
+
     /// 登记一个终端连接，返回的守卫在 drop 时自动注销。
     pub fn client_guard(self: &Arc<Self>) -> ClientGuard {
         self.clients.fetch_add(1, Ordering::Relaxed);
@@ -213,10 +254,18 @@ struct Worker {
     log: LogFile,
     rx: LineSplitter,
     tx: LineSplitter,
+    predecessor: Option<JoinHandle<()>>,
+    /// 未连接期间累计丢弃、尚未提示的写入字节数
+    dropped: usize,
+    last_drop_notice: Option<Instant>,
 }
 
 impl Worker {
     fn run(mut self) {
+        // 同名串口重建时，等旧线程把串口关掉再打开，否则会先报一次"拒绝访问"。
+        if let Some(previous) = self.predecessor.take() {
+            let _ = previous.join();
+        }
         let mut last_error: Option<String> = None;
         let mut announced_waiting = false;
         while !self.stopped() {
@@ -270,6 +319,7 @@ impl Worker {
     /// 已连接状态下的读写循环；返回断开的原因。
     fn serve(&mut self, mut port: Box<dyn SerialPort>, com: &str) -> String {
         let mut buf = vec![0u8; 4096];
+        let mut pending: Vec<u8> = Vec::new();
         let mut last_presence_check = Instant::now();
         loop {
             if self.stopped() {
@@ -282,11 +332,22 @@ impl Worker {
                 Err(e) => return e.to_string(),
             }
 
-            while let Ok(data) = self.write_rx.try_recv() {
-                if let Err(e) = port.write_all(&data) {
-                    return e.to_string();
+            // 写超时（低波特率或驱动发送缓冲满）不是断开：没写完的留到下一轮继续写。
+            while pending.len() < MAX_PENDING_WRITE {
+                match self.write_rx.try_recv() {
+                    Ok(data) => pending.extend_from_slice(&data),
+                    Err(_) => break,
                 }
-                self.on_tx(&data);
+            }
+            if !pending.is_empty() {
+                match port.write(&pending) {
+                    Ok(n) => {
+                        let written: Vec<u8> = pending.drain(..n).collect();
+                        self.on_tx(&written);
+                    }
+                    Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
+                    Err(e) => return e.to_string(),
+                }
             }
 
             let now = Instant::now();
@@ -351,12 +412,19 @@ impl Worker {
     }
 
     /// 未连接时等待一段时间；期间到达的写入会被丢弃。
+    ///
+    /// 丢弃提示合并后最多每 5 秒一条，否则终端里每敲一个键都会刷出一行。
     fn idle(&mut self, total: Duration) {
         let deadline = Instant::now() + total;
         while !self.stopped() && Instant::now() < deadline {
-            let dropped: usize = self.write_rx.try_iter().map(|d| d.len()).sum();
-            if dropped > 0 {
-                self.sys(format!("设备未连接，丢弃 {dropped} 字节写入"));
+            self.dropped += self.write_rx.try_iter().map(|d| d.len()).sum::<usize>();
+            let due = self
+                .last_drop_notice
+                .is_none_or(|t| t.elapsed() >= DROP_NOTICE_INTERVAL);
+            if self.dropped > 0 && due {
+                self.sys(format!("设备未连接，丢弃 {} 字节写入", self.dropped));
+                self.dropped = 0;
+                self.last_drop_notice = Some(Instant::now());
             }
             std::thread::sleep(Duration::from_millis(50));
         }

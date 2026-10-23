@@ -12,6 +12,7 @@ pub struct LogFile {
     dir: PathBuf,
     name: String,
     current: Option<(NaiveDate, BufWriter<File>)>,
+    failing: bool,
 }
 
 impl LogFile {
@@ -20,6 +21,7 @@ impl LogFile {
             dir: root.join(name),
             name: name.to_string(),
             current: None,
+            failing: false,
         }
     }
 
@@ -29,10 +31,22 @@ impl LogFile {
     }
 
     /// 写入一行。写失败只记录警告，不影响串口数据的分发。
+    ///
+    /// 持续失败（例如磁盘满）时只在开始失败和恢复时各记一次，不逐行刷日志。
     pub fn write(&mut self, line: &LogLine) {
-        if let Err(e) = self.try_write(line) {
-            tracing::warn!(port = %self.name, "写日志文件失败: {e}");
-            self.current = None;
+        match self.try_write(line) {
+            Ok(()) if self.failing => {
+                self.failing = false;
+                tracing::info!(port = %self.name, "日志文件恢复写入");
+            }
+            Ok(()) => {}
+            Err(e) => {
+                if !self.failing {
+                    tracing::warn!(port = %self.name, "写日志文件失败: {e}");
+                    self.failing = true;
+                }
+                self.current = None;
+            }
         }
     }
 

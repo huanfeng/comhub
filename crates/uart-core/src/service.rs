@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::config::{Config, PortConfig};
-use crate::port::{PortHub, PortSnapshot};
+use crate::config::{Config, PortConfig, ServerConfig};
+use crate::port::{Handover, PortHub, PortSnapshot};
 use crate::{http, terminal};
 
 /// 通知外部（例如 GUI）刷新显示。
@@ -32,7 +33,7 @@ pub struct Service {
     config: Mutex<Config>,
     config_path: PathBuf,
     ports: Mutex<BTreeMap<String, PortEntry>>,
-    http: Mutex<Option<JoinHandle<()>>>,
+    http: Mutex<Option<HttpServer>>,
     on_event: EventSink,
 }
 
@@ -51,7 +52,7 @@ impl Service {
             http: Mutex::new(None),
             on_event: Arc::new(on_event),
         });
-        service.apply(config, true);
+        service.apply(None, config);
         Ok(service)
     }
 
@@ -84,21 +85,31 @@ impl Service {
     pub fn reload(self: &Arc<Self>, config: Config) -> Result<()> {
         config.validate()?;
         let old = std::mem::replace(&mut *self.config.lock().unwrap(), config.clone());
-        self.apply(config, old.server != self.config().server);
+        self.apply(Some(&old.server), config);
         (self.on_event)(ServiceEvent::PortsReloaded);
         Ok(())
     }
 
-    fn apply(self: &Arc<Self>, config: Config, server_changed: bool) {
-        if server_changed {
+    /// `old` 为 `None` 表示首次启动。
+    fn apply(self: &Arc<Self>, old: Option<&ServerConfig>, config: Config) {
+        let server = &config.server;
+        // token 每个请求都现读配置，改它不需要重启任何东西。
+        let http_changed = old.is_none_or(|o| o.bind != server.bind || o.http_port != server.http_port);
+        // 终端端口跟随 bind，日志文件由 IO 线程持有，这两项变了要重建串口。
+        let ports_changed = old.is_some_and(|o| o.bind != server.bind || o.log_dir != server.log_dir);
+
+        if http_changed {
             warn_if_exposed(&config);
+            let (stop_tx, stop_rx) = oneshot::channel();
             let task = tokio::spawn(http::serve(
                 self.clone(),
-                config.server.bind.clone(),
-                config.server.http_port,
+                server.bind.clone(),
+                server.http_port,
+                stop_rx,
             ));
-            if let Some(old) = self.http.lock().unwrap().replace(task) {
-                old.abort();
+            if let Some(old) = self.http.lock().unwrap().replace(HttpServer { task, stop_tx }) {
+                // 优雅关闭：旧监听立即停止接受连接，已建立的连接处理完当前请求后关闭。
+                let _ = old.stop_tx.send(());
             }
         }
 
@@ -110,50 +121,68 @@ impl Service {
             .map(|p| (p.name.clone(), p.clone()))
             .collect();
 
-        let mut ports = self.ports.lock().unwrap();
-        let stale: Vec<String> = ports
-            .iter()
-            .filter(|(name, entry)| {
-                server_changed || wanted.get(*name) != Some(entry.hub.config())
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
-        for name in stale {
-            if let Some(entry) = ports.remove(&name) {
-                stop_entry(entry);
-            }
+        // 锁内只摘出要停的条目，停止和等待都在锁外做。
+        let stale: Vec<PortEntry> = {
+            let mut ports = self.ports.lock().unwrap();
+            let names: Vec<String> = ports
+                .iter()
+                .filter(|(name, entry)| ports_changed || wanted.get(*name) != Some(entry.hub.config()))
+                .map(|(name, _)| name.clone())
+                .collect();
+            names.iter().filter_map(|n| ports.remove(n)).collect()
+        };
+        let mut handovers: BTreeMap<String, Handover> = BTreeMap::new();
+        for entry in stale {
+            entry.terminal.abort();
+            // 不等待旧线程：同名串口的新线程会自己等它，删掉的串口让它自行退出。
+            let predecessor = entry.hub.request_stop();
+            handovers.insert(
+                entry.hub.name().to_string(),
+                Handover { buffer: Some(entry.hub.buffer_handle()), predecessor },
+            );
         }
 
+        let mut ports = self.ports.lock().unwrap();
+        for entry in ports.values() {
+            entry.hub.with_buffer_mut(|b| b.set_capacity(server.buffer_lines));
+        }
         for (name, port_config) in wanted {
             if ports.contains_key(&name) {
                 continue;
             }
             let on_event = self.on_event.clone();
-            let hub = PortHub::start(port_config, config.server.buffer_lines, &log_root, move |n| {
+            let handover = handovers.remove(&name).unwrap_or_default();
+            let hub = PortHub::start(port_config, server.buffer_lines, &log_root, handover, move |n| {
                 on_event(ServiceEvent::PortChanged(n.to_string()))
             });
-            let terminal = tokio::spawn(terminal::serve(hub.clone(), config.server.bind.clone()));
+            let terminal = tokio::spawn(terminal::serve(hub.clone(), server.bind.clone()));
             ports.insert(name, PortEntry { hub, terminal });
         }
     }
 
-    /// 停止所有串口和 HTTP 服务。
+    /// 停止所有串口和 HTTP 服务，等待串口线程退出。
     pub fn shutdown(&self) {
-        if let Some(task) = self.http.lock().unwrap().take() {
-            task.abort();
+        if let Some(http) = self.http.lock().unwrap().take() {
+            http.task.abort();
         }
         let entries = std::mem::take(&mut *self.ports.lock().unwrap());
-        for entry in entries.into_values() {
-            stop_entry(entry);
+        let handles: Vec<_> = entries
+            .into_values()
+            .filter_map(|entry| {
+                entry.terminal.abort();
+                entry.hub.request_stop()
+            })
+            .collect();
+        for handle in handles {
+            let _ = handle.join();
         }
     }
 }
 
-fn stop_entry(entry: PortEntry) {
-    entry.terminal.abort();
-    entry.hub.stop();
+struct HttpServer {
+    task: JoinHandle<()>,
+    stop_tx: oneshot::Sender<()>,
 }
-
 /// 对外监听时提醒当前的访问控制情况。
 fn warn_if_exposed(config: &Config) {
     let loopback = config
@@ -220,12 +249,24 @@ mod tests {
             .unwrap();
         assert!(Arc::ptr_eq(&a, &service.port("A").unwrap()), "未变化的串口应保持运行");
         let b = service.port("b").unwrap();
+        b.with_buffer_mut(|buf| {
+            buf.push(chrono::Local::now(), crate::buffer::Direction::Rx, "x".into());
+        });
+        let seq_before = b.snapshot().last_seq;
+
+        // 只改 token：串口和 HTTP 都不重启
+        let mut with_token = config(vec![port("a", 47101, 115_200), port("b", 47102, 115_200)]);
+        with_token.server.token = Some("t".into());
+        service.reload(with_token).unwrap();
+        assert!(Arc::ptr_eq(&b, &service.port("b").unwrap()), "只改 token 不应重建串口");
 
         service.reload(config(vec![port("b", 47102, 921_600)])).unwrap();
         assert!(service.port("a").is_none(), "删除的串口应停止");
         let b2 = service.port("b").unwrap();
         assert!(!Arc::ptr_eq(&b, &b2), "配置变化的串口应重新创建");
         assert_eq!(b2.config().baud, 921_600);
+        assert!(Arc::ptr_eq(&b.buffer_handle(), &b2.buffer_handle()), "重建应沿用旧缓冲");
+        assert!(b2.snapshot().last_seq >= seq_before, "重建后 seq 不应回退");
         assert!(*b.closed().borrow(), "旧的串口应发出关闭信号");
 
         let mut disabled = port("b", 47102, 921_600);
@@ -234,6 +275,31 @@ mod tests {
         assert!(service.ports().is_empty(), "停用的串口不应运行");
 
         assert!(service.reload(config(vec![port("x", 47100, 1)])).is_err(), "与 HTTP 端口冲突应拒绝");
+
+        // 改 HTTP 端口：新端口要能连上（旧服务关闭后才能复用端口，这里换一个端口验证重启本身）
+        let mut moved = config(vec![]);
+        moved.server.http_port = 47110;
+        service.reload(moved).unwrap();
+        let mut connected = false;
+        for _ in 0..20 {
+            if tokio::net::TcpStream::connect("127.0.0.1:47110").await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(connected, "HTTP 服务应在新端口上监听");
+
+        // 同一端口重启（改 bind 写法）：旧服务关闭、新服务重试 bind 后仍要在监听
+        let mut rebind = config(vec![]);
+        rebind.server.http_port = 47110;
+        rebind.server.bind = "localhost".into();
+        service.reload(rebind).unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        assert!(
+            tokio::net::TcpStream::connect("localhost:47110").await.is_ok(),
+            "同端口重启后 HTTP 服务应继续监听"
+        );
         service.shutdown();
     }
 }

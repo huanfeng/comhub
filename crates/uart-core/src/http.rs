@@ -15,14 +15,17 @@ use axum::Router;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast::{self, error::RecvError};
+use tokio::sync::oneshot;
 
-use crate::buffer::LogLine;
+use crate::buffer::{Direction, LogLine};
 use crate::devices;
 use crate::port::{PortHub, PortSnapshot, PortState};
 use crate::service::Service;
 
 const USAGE: &str = include_str!("usage.md");
 const MAX_TIMEOUT_SECS: f64 = 600.0;
+/// 监听端口失败时的重试次数（每次间隔 300ms）。
+const BIND_RETRIES: u32 = 10;
 /// wait / expect 期间最多返回的行数（保留最新的）。
 const MAX_WAIT_LINES: usize = 5000;
 
@@ -41,17 +44,33 @@ pub fn router(service: Arc<Service>) -> Router {
         .with_state(service)
 }
 
-pub async fn serve(service: Arc<Service>, bind: String, port: u16) {
+/// 运行 HTTP 服务，直到 `stop` 收到信号（或发送端被丢弃）后优雅关闭。
+pub async fn serve(service: Arc<Service>, bind: String, port: u16, stop: oneshot::Receiver<()>) {
     let addr = format!("{bind}:{port}");
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            tracing::error!("HTTP 服务监听 {addr} 失败: {e}");
-            return;
+    // 重新加载配置时旧服务刚收到关闭信号，端口可能还没释放（Windows 上不设 SO_REUSEADDR），所以重试几次。
+    let mut attempt = 0;
+    let listener = loop {
+        match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => break l,
+            Err(e) if attempt < BIND_RETRIES => {
+                attempt += 1;
+                tracing::debug!("HTTP 监听 {addr} 失败，稍后重试: {e}");
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            Err(e) => {
+                tracing::error!("HTTP 服务监听 {addr} 失败: {e}");
+                return;
+            }
         }
     };
     tracing::info!("HTTP 服务监听 http://{addr}/");
-    if let Err(e) = axum::serve(listener, router(service)).await {
+    let shutdown = async {
+        let _ = stop.await;
+    };
+    if let Err(e) = axum::serve(listener, router(service))
+        .with_graceful_shutdown(shutdown)
+        .await
+    {
         tracing::error!("HTTP 服务异常退出: {e}");
     }
 }
@@ -66,6 +85,7 @@ struct Params {
     expect: Option<String>,
     timeout: Option<f64>,
     eol: Option<String>,
+    dir: Option<String>,
     token: Option<String>,
 }
 
@@ -75,7 +95,14 @@ impl Params {
     }
 
     fn timeout(&self, default_secs: f64) -> Duration {
-        Duration::from_secs_f64(self.timeout.unwrap_or(default_secs).clamp(0.0, MAX_TIMEOUT_SECS))
+        // NaN / inf 会让 Duration::from_secs_f64 panic
+        let secs = self.timeout.filter(|t| t.is_finite()).unwrap_or(default_secs);
+        Duration::from_secs_f64(secs.clamp(0.0, MAX_TIMEOUT_SECS))
+    }
+
+    /// `dir=any` 时 TX/SYS 行也参与 wait / expect 的匹配。
+    fn any_dir(&self) -> bool {
+        self.dir.as_deref() == Some("any")
     }
 }
 
@@ -103,7 +130,11 @@ async fn auth(
     }
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
     if !is_allowed_host(host) {
-        return ApiError(StatusCode::FORBIDDEN, format!("不接受 Host `{host}`")).into_response();
+        return ApiError(
+            StatusCode::FORBIDDEN,
+            format!("不接受 Host `{host}`：请用 IP 地址、localhost 或不带点的主机名访问"),
+        )
+        .into_response();
     }
 
     if let Some(token) = service.config().server.token {
@@ -279,17 +310,28 @@ async fn log(
     let (lines, last_seq) = hub.with_buffer(|b| {
         (b.since(params.since.unwrap_or(0), params.limit.unwrap_or(1000)), b.last_seq())
     });
+    let since = params.since.unwrap_or(0);
     // 没有新数据时游标保持不变；有数据时指向本次最后一行（可能还没读完，下次接着读）。
-    let next = lines.last().map(|l| l.seq).unwrap_or_else(|| params.since.unwrap_or(0).min(last_seq));
+    let next = lines.last().map(|l| l.seq).unwrap_or_else(|| since.min(last_seq));
+    // 游标之后的部分行已被挤出缓冲：告诉调用方中间有缺口，而不是悄悄跳过。
+    let gap = lines
+        .first()
+        .filter(|first| since > 0 && first.seq > since + 1)
+        .map(|first| (since + 1, first.seq - 1));
     let mut response = if params.json() {
         #[derive(Serialize)]
         struct LogPage<'a> {
             lines: &'a [LogLine],
             next_seq: u64,
+            gap: Option<(u64, u64)>,
         }
-        json(&LogPage { lines: &lines, next_seq: next })
+        json(&LogPage { lines: &lines, next_seq: next, gap })
     } else {
-        let mut body = render_lines(&lines);
+        let mut body = String::new();
+        if let Some((from, to)) = gap {
+            let _ = writeln!(body, "-- gap: 第 {from}..{to} 行已不在内存缓冲中，完整内容见日志文件");
+        }
+        body.push_str(&render_lines(&lines));
         let _ = writeln!(body, "-- next_seq={next}");
         text(body)
     };
@@ -318,8 +360,8 @@ async fn wait(
     let hub = find_port(&service, &name)?;
     let re = parse_regex(params.pattern.as_deref(), "pattern")?;
     let mut rx = hub.subscribe_lines();
-    let (lines, matched) = collect_until(&hub, &mut rx, &re, params.timeout(30.0)).await;
-    Ok(wait_response(&lines, matched, &params))
+    let (lines, end) = collect_until(&hub, &mut rx, &re, params.any_dir(), params.timeout(30.0)).await;
+    Ok(wait_response(&lines, end, &params))
 }
 
 async fn send(
@@ -361,8 +403,8 @@ async fn send(
 
     match expect {
         Some(re) => {
-            let (lines, matched) = collect_until(&hub, &mut rx, &re, params.timeout(5.0)).await;
-            Ok(wait_response(&lines, matched, &params))
+            let (lines, end) = collect_until(&hub, &mut rx, &re, params.any_dir(), params.timeout(5.0)).await;
+            Ok(wait_response(&lines, end, &params))
         }
         None if params.json() => Ok(json(&serde_json::json!({ "sent": len }))),
         None => Ok(text(format!("已发送 {len} 字节\n"))),
@@ -398,52 +440,80 @@ async fn stream(
     Ok(([(header::CONTENT_TYPE, content_type)], Body::from_stream(body)).into_response())
 }
 
-/// 收集新到达的行，直到出现匹配行或超时。返回（期间的行，是否匹配）。
+/// 等待结束的原因。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitEnd {
+    Matched,
+    Timeout,
+    /// 串口被停止（配置被修改或删除）
+    Closed,
+}
+
+/// 收集新到达的行，直到出现匹配行、超时或串口停止。
+///
+/// 默认只拿设备输出（RX）去匹配：发出去的命令本身（TX）常常包含要等的关键字，
+/// 比如 `send reboot --expect boot`。`any_dir` 为真时 TX/SYS 行也参与匹配。
+/// 返回的行包含所有方向，方便看清上下文。
 async fn collect_until(
     hub: &PortHub,
     rx: &mut broadcast::Receiver<LogLine>,
     re: &Regex,
+    any_dir: bool,
     timeout: Duration,
-) -> (Vec<LogLine>, bool) {
+) -> (Vec<LogLine>, WaitEnd) {
     let mut closed = hub.closed();
+    // 已处理到的 seq：广播积压（Lagged）时从环形缓冲补齐，并据此去重。
+    let mut last_seen = hub.with_buffer(|b| b.last_seq());
     let mut lines = VecDeque::new();
     let deadline = tokio::time::Instant::now() + timeout;
-    let matched = loop {
+    loop {
         let received = tokio::select! {
             r = tokio::time::timeout_at(deadline, rx.recv()) => r,
-            _ = closed.wait_for(|c| *c) => break false,
+            _ = closed.wait_for(|c| *c) => return (lines.into(), WaitEnd::Closed),
         };
-        let line = match received {
-            Err(_) => break false,
-            Ok(Err(RecvError::Closed)) => break false,
-            Ok(Err(RecvError::Lagged(_))) => continue,
-            Ok(Ok(line)) => line,
+        let batch = match received {
+            Err(_) => return (lines.into(), WaitEnd::Timeout),
+            Ok(Err(RecvError::Closed)) => return (lines.into(), WaitEnd::Closed),
+            Ok(Err(RecvError::Lagged(_))) => hub.with_buffer(|b| b.since(last_seen, MAX_WAIT_LINES)),
+            Ok(Ok(line)) => vec![line],
         };
-        let hit = re.is_match(&line.text);
-        if lines.len() == MAX_WAIT_LINES {
-            lines.pop_front();
+        for line in batch {
+            if line.seq <= last_seen {
+                continue;
+            }
+            last_seen = line.seq;
+            let hit = (any_dir || line.dir == Direction::Rx) && re.is_match(&line.text);
+            if lines.len() == MAX_WAIT_LINES {
+                lines.pop_front();
+            }
+            lines.push_back(line);
+            if hit {
+                return (lines.into(), WaitEnd::Matched);
+            }
         }
-        lines.push_back(line);
-        if hit {
-            break true;
-        }
-    };
-    (lines.into(), matched)
+    }
 }
 
-fn wait_response(lines: &[LogLine], matched: bool, params: &Params) -> Response {
+fn wait_response(lines: &[LogLine], end: WaitEnd, params: &Params) -> Response {
+    let (status, note) = match end {
+        WaitEnd::Matched => (StatusCode::OK, None),
+        WaitEnd::Timeout => (StatusCode::REQUEST_TIMEOUT, Some("-- timeout: 未等到匹配行")),
+        WaitEnd::Closed => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Some("-- closed: 串口已停止（配置被修改或删除）"),
+        ),
+    };
     let mut response = if params.json() {
-        json(&serde_json::json!({ "matched": matched, "lines": lines }))
+        json(&serde_json::json!({ "matched": end == WaitEnd::Matched, "lines": lines }))
     } else {
         let mut body = render_lines(lines);
-        if !matched {
-            body.push_str("-- timeout: 未等到匹配行\n");
+        if let Some(note) = note {
+            body.push_str(note);
+            body.push('\n');
         }
         text(body)
     };
-    if !matched {
-        *response.status_mut() = StatusCode::REQUEST_TIMEOUT;
-    }
+    *response.status_mut() = status;
     response
 }
 
