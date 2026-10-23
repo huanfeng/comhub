@@ -59,11 +59,14 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
+    let mut load_error = None;
     let config = match Config::load(&config_path) {
         Ok(config) => config,
         Err(e) if !args.headless => {
-            // GUI 模式下配置有误也要能启动，用户可以在界面里打开配置文件修改
+            // GUI 模式下配置有误也要能启动，用户可以在界面里打开配置文件修改；
+            // 界面会提示错误，并在修正之前禁止保存，避免用空配置覆盖原文件。
             tracing::error!("{e:#}，使用空配置启动");
+            load_error = Some(format!("{e:#}"));
             Config::default()
         }
         Err(e) => return Err(e),
@@ -78,7 +81,7 @@ fn main() -> Result<()> {
         }
         run_headless(config, config_path)
     } else {
-        run_gui(config, config_path, !args.autostart)
+        run_gui(config, config_path, load_error, !args.autostart)
     }
 }
 
@@ -93,13 +96,18 @@ fn run_headless(config: Config, config_path: PathBuf) -> Result<()> {
     })
 }
 
-fn run_gui(config: Config, config_path: PathBuf, open_window: bool) -> Result<()> {
+fn run_gui(
+    config: Config,
+    config_path: PathBuf,
+    load_error: Option<String>,
+    open_window: bool,
+) -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let service = {
         let _guard = runtime.enter();
         Service::start(config, &config_path, |_| {})?
     };
-    gui::run(service.clone(), runtime.handle().clone(), open_window);
+    gui::run(service.clone(), runtime.handle().clone(), load_error, open_window);
     service.shutdown();
     Ok(())
 }

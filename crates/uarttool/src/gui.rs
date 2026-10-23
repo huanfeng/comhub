@@ -38,15 +38,23 @@ struct Gui {
     /// 主窗口顶部的一行概要
     summary: Signal<String>,
     autostart: Signal<bool>,
+    /// 配置文件解析失败的错误信息；非空时禁止在界面里保存配置
+    load_error: Signal<String>,
 }
 
-pub fn run(service: Arc<Service>, runtime: tokio::runtime::Handle, open_window: bool) {
+pub fn run(
+    service: Arc<Service>,
+    runtime: tokio::runtime::Handle,
+    load_error: Option<String>,
+    open_window: bool,
+) {
     let gui = Gui {
         service,
         runtime,
         rows: signal(Vec::new()),
         summary: signal(String::new()),
         autostart: signal(autostart::is_enabled()),
+        load_error: signal(load_error.unwrap_or_default()),
     };
     let (tooltip, online) = gui.refresh();
 
@@ -177,6 +185,22 @@ impl Gui {
         format!("http://{host}:{}/", server.http_port)
     }
 
+    /// 界面修改配置的基准：重新读取配置文件，而不是用内存里的配置，
+    /// 这样用户在文件里的手工修改（还没点重新加载）不会被界面保存冲掉。
+    ///
+    /// 配置文件解析失败时拒绝：此时内存里是空配置，保存会覆盖用户的原文件。
+    fn editable_config(&self) -> Result<Config, String> {
+        // 详细错误显示在主窗口顶部，这里只给一句提示，避免撑破对话框。
+        const HINT: &str = "配置文件有错误，请先修正后点「重新加载配置」（详情见主窗口顶部）";
+        if !self.load_error.with(|e| e.is_empty()) {
+            return Err(HINT.into());
+        }
+        Config::load(self.service.config_path()).map_err(|e| {
+            self.load_error.set(format!("{e:#}"));
+            HINT.to_string()
+        })
+    }
+
     /// 保存配置文件并让服务应用新配置。
     fn apply_config(&self, config: Config) -> Result<()> {
         config.save(self.service.config_path())?;
@@ -187,9 +211,12 @@ impl Gui {
     }
 
     fn reload_from_file(&self) -> Result<()> {
-        let config = Config::load(self.service.config_path())?;
+        let config = Config::load(self.service.config_path()).inspect_err(|e| {
+            self.load_error.set(format!("{e:#}"));
+        })?;
         let _guard = self.runtime.enter();
         self.service.reload(config)?;
+        self.load_error.set(String::new());
         self.refresh();
         Ok(())
     }
@@ -213,6 +240,8 @@ impl Gui {
     fn main_view(&self) -> Element {
         let editor = Editor::new(self.clone());
         let confirm = Confirm::new(self.clone());
+        let load_error = self.load_error;
+        let load_error_text = load_error.map(|e| format!("配置文件解析失败，修正后点「重新加载配置」：{e}"));
 
         let header = Element::row()
             .width_match()
@@ -317,6 +346,12 @@ impl Gui {
                     .spacing(10)
                     .child(header)
                     .child(Element::label_signal(self.summary).fg_role(Role::TextMuted).width_match())
+                    .child(
+                        Element::label_signal(load_error_text)
+                            .fg(Color::hex(DANGER))
+                            .width_match()
+                            .visible_when(move || load_error.with(|e| !e.is_empty())),
+                    )
                     .child(empty_hint)
                     .child(table)
                     .child(footer),
@@ -434,7 +469,7 @@ impl Editor {
 
     /// 打开对话框：`name` 为 `None` 时新增，否则编辑该串口。
     fn open(&self, name: Option<String>) {
-        let config = self.gui.service.config();
+        let config = self.gui.editable_config().unwrap_or_else(|_| self.gui.service.config());
         let existing = name
             .as_deref()
             .and_then(|n| config.ports.iter().find(|p| p.name == n))
@@ -461,7 +496,12 @@ impl Editor {
         let mut selected = 0;
         if let Some(p) = &existing {
             match devices::find_device(p, &devices) {
-                Some(d) => selected = devices.iter().position(|x| x.com == d.com).unwrap_or(0),
+                Some(d) => {
+                    selected = devices.iter().position(|x| x.com == d.com).unwrap_or(0);
+                    // 选中的就是当前匹配到的设备：保留原来的匹配规则，原样保存时配置不变、串口不重启
+                    choices[selected].serial_number = p.serial_number.clone();
+                    choices[selected].com = p.com.clone();
+                }
                 None => {
                     let rule = match (&p.serial_number, &p.com) {
                         (Some(sn), _) => format!("序列号 {sn}"),
@@ -508,6 +548,7 @@ impl Editor {
     }
 
     fn save(&self) -> Result<(), String> {
+        let mut config = self.gui.editable_config()?;
         let name = self.name.get().trim().to_string();
         if name.is_empty() {
             return Err("请填写名称".into());
@@ -536,7 +577,6 @@ impl Editor {
             enabled: self.enabled.get(),
         };
 
-        let mut config = self.gui.service.config();
         match self.original.borrow().as_deref() {
             Some(original) => match config.ports.iter_mut().find(|p| p.name == original) {
                 Some(slot) => *slot = port,
@@ -638,7 +678,13 @@ impl Confirm {
             )
             .child(Element::button("删除").small().danger().on_click(move |ctx| {
                 let target = this.target.get();
-                let mut config = this.gui.service.config();
+                let mut config = match this.gui.editable_config() {
+                    Ok(config) => config,
+                    Err(e) => {
+                        ctx.toast_err(e);
+                        return;
+                    }
+                };
                 config.ports.retain(|p| p.name != target);
                 match this.gui.apply_config(config) {
                     Ok(()) => ctx.toast_ok(format!("已删除 {target}")),
