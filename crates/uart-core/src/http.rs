@@ -96,6 +96,16 @@ async fn auth(
     request: Request,
     next: Next,
 ) -> Response {
+    // 防止本机浏览器里的网页借道访问：浏览器的跨域请求总会带 Origin，命令行工具不会；
+    // DNS 重绑定攻击的 Host 是攻击者的域名，这里只接受 IP、本机名和 .local 名称。
+    if headers.contains_key(header::ORIGIN) {
+        return ApiError(StatusCode::FORBIDDEN, "不接受来自浏览器网页的请求".into()).into_response();
+    }
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
+    if !is_allowed_host(host) {
+        return ApiError(StatusCode::FORBIDDEN, format!("不接受 Host `{host}`")).into_response();
+    }
+
     if let Some(token) = service.config().server.token {
         let bearer = headers
             .get(header::AUTHORIZATION)
@@ -110,6 +120,24 @@ async fn auth(
         }
     }
     next.run(request).await
+}
+
+/// Host 头（可带端口）是否是 IP、`localhost`、不带点的主机名或 `*.local`。
+fn is_allowed_host(host: &str) -> bool {
+    let name = if let Some(v6) = host.strip_prefix('[') {
+        // [::1]:7000
+        return v6.split(']').next().is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok());
+    } else {
+        host.rsplit_once(':').map_or(host, |(name, _)| name)
+    };
+    if name.is_empty() {
+        return false;
+    }
+    let name = name.to_ascii_lowercase();
+    name.parse::<std::net::Ipv4Addr>().is_ok()
+        || name == "localhost"
+        || !name.contains('.')
+        || name.ends_with(".local")
 }
 
 fn find_port(service: &Service, name: &str) -> Result<Arc<PortHub>, ApiError> {
@@ -417,4 +445,19 @@ fn wait_response(lines: &[LogLine], matched: bool, params: &Params) -> Response 
         *response.status_mut() = StatusCode::REQUEST_TIMEOUT;
     }
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_allowlist() {
+        for ok in ["127.0.0.1:7000", "192.168.1.10", "localhost:7000", "devpc:7000", "devpc.local", "[::1]:7000"] {
+            assert!(is_allowed_host(ok), "{ok}");
+        }
+        for bad in ["", "evil.com", "evil.com:7000", "127.0.0.1.nip.io", "[evil]:7000"] {
+            assert!(!is_allowed_host(bad), "{bad}");
+        }
+    }
 }
