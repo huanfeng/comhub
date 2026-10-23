@@ -20,7 +20,7 @@
 ## 2. 架构
 
 ```
-uarttool.exe（托盘常驻；也可以 --headless 运行）
+uarttool.exe（托盘常驻；无界面运行用 `uartctl serve`）
 ├─ UI 线程：windui 事件循环（托盘 + 按需打开的主窗口）
 │      ▲ 事件回调（状态变化）→ App::channel
 │      ▼ 命令（新增/删除/重载串口）
@@ -126,7 +126,12 @@ uartctl [--host <addr>] [--token <t>] [--json] <命令>
   wait   <name> <regex> [--timeout 30]  等待某行出现
   follow <name>                         持续输出
   send   <name> <text> [--expect <regex>] [--timeout 5] [--eol crlf]
+  devices [--local]                     服务所在机器的串口；--local 直接枚举本机，不需要服务
+  serve  [--config <path>]              不启动界面，在前台运行服务
 ```
+
+uarttool 是 GUI 子系统程序，没有控制台输出，所以"列出串口""无界面运行服务"这类命令行功能放在
+uartctl（控制台程序）里。`serve` 与托盘程序共用同一份配置，两者不要同时运行。
 
 `--host` 默认是 `127.0.0.1:7000`，也可以用环境变量 `UARTCTL_HOST` 指定。
 
@@ -134,7 +139,7 @@ uartctl [--host <addr>] [--token <t>] [--json] <命令>
 
 | 阶段 | 内容 |
 |---|---|
-| M1 | 配置、PortHub、行切分、环形缓冲、日志文件、热插拔、`--headless` |
+| M1 | 配置、PortHub、行切分、环形缓冲、日志文件、热插拔、无界面运行 |
 | M2 | Terminal 服务（telnet / raw） |
 | M3 | HTTP 接口、`uartctl`、AI 使用说明 |
 | M4 | windui 托盘 GUI、开机自启 |

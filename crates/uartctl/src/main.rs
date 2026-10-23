@@ -1,5 +1,7 @@
 //! uartctl：uarttool 的命令行客户端，通过 HTTP 接口读取串口日志、向设备发送命令。
 
+mod local;
+
 use std::io::{Read, Write};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -17,6 +19,7 @@ const AFTER_HELP: &str = "\
 
 示例：
   uartctl list                                      查看有哪些串口
+  uartctl devices --local                           列出本机串口及 USB 序列号（不需要服务）
   uartctl tail esp32 -n 100                         最近 100 行日志
   uartctl log esp32 --since 1520                    1520 之后的新日志（末行给出下次的 since）
   uartctl grep esp32 \"(?i)error|panic\"              搜索最近的错误
@@ -50,8 +53,12 @@ struct Cli {
 enum Command {
     /// 列出共享的串口及状态
     List,
-    /// 列出本机所有串口设备（COM 号、USB 序列号，用于填写配置）
-    Devices,
+    /// 列出服务所在机器的串口设备（COM 号、USB 序列号，用于填写配置）
+    Devices {
+        /// 直接枚举本机串口，不经过服务（服务没有运行时也可用）
+        #[arg(long)]
+        local: bool,
+    },
     /// 显示最近 N 行日志
     Tail {
         name: String,
@@ -108,6 +115,12 @@ enum Command {
     },
     /// 显示服务端的接口说明
     Doc,
+    /// 不启动界面，在前台运行串口共享服务（日志输出到控制台，Ctrl+C 退出）
+    Serve {
+        /// 配置文件路径，默认 %APPDATA%\uarttool\config.toml
+        #[arg(long, short)]
+        config: Option<std::path::PathBuf>,
+    },
 }
 
 /// HTTP 请求本身的超时要比等待时间长一些，留出网络往返。
@@ -128,7 +141,15 @@ fn run(cli: Cli) -> Result<ExitCode> {
     let client = Client::new(&cli);
     match cli.command {
         Command::List => client.print(client.get("/ports", None)),
-        Command::Devices => client.print(client.get("/devices", None)),
+        Command::Devices { local: true } => {
+            local::print_devices();
+            Ok(ExitCode::SUCCESS)
+        }
+        Command::Devices { local: false } => client.print(client.get("/devices", None)),
+        Command::Serve { config } => {
+            local::serve(config)?;
+            Ok(ExitCode::SUCCESS)
+        }
         Command::Doc => client.print(client.get("/", None)),
         Command::Tail { name, lines } => client.print(
             client

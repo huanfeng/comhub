@@ -8,3 +8,7 @@ license.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 ureq = { version = "3", default-features = false }
+uart-core.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

@@ -2224,6 +2224,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uart-core",
  "ureq",
 ]
 
@@ -2237,7 +2241,6 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uart-core",
- "windows-sys 0.61.2",
  "windui",
  "winreg 0.55.0",
 ]

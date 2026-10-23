@@ -4,8 +4,8 @@
 可以**同时**使用同一个串口，主要用于设备调试时抓取日志。
 
 - `crates/uart-core`：服务核心（串口、日志、Terminal 服务、HTTP 接口）
-- `crates/uarttool`：托盘常驻程序（也可以 `--headless` 运行）
-- `crates/uartctl`：命令行工具，供脚本和 AI 使用
+- `crates/uarttool`：托盘常驻程序
+- `crates/uartctl`：命令行工具，供脚本和 AI 使用；也可以列出本机串口、无界面运行服务
 
 设计见 [docs/DESIGN.md](docs/DESIGN.md)，AI 接入见 [docs/AI.md](docs/AI.md)。
 
@@ -44,10 +44,15 @@ cargo build --release
 ### 命令行参数
 
 ```
-uarttool [--config <path>] [--autostart] [--headless] [--list]
+uarttool [--config <path>] [--autostart]
   --autostart   只显示托盘，不打开主窗口（开机自启使用）
-  --headless    不启动界面，只运行服务，日志输出到控制台
-  --list        列出本机串口及 USB 序列号
+```
+
+uarttool 是 GUI 程序，命令行功能都在 `uartctl` 里：
+
+```
+uartctl devices --local        列出本机串口及 USB 序列号（不需要服务在运行）
+uartctl serve [--config <path>]  不启动界面，在前台运行服务（日志输出到控制台）
 ```
 
 ## 安全

@@ -13,4 +13,3 @@ tracing-subscriber.workspace = true
 clap.workspace = true
 windui = "0.28"
 winreg = "0.55"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

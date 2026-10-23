@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn strips_charset_designation() {
-        assert_eq!(render_line(b"(B[mok", Encoding::Utf8), "ok");
+        assert_eq!(render_line(b"\x1b(B\x1b[mok", Encoding::Utf8), "ok");
     }
 
     #[test]
