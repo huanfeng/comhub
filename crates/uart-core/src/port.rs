@@ -106,8 +106,8 @@ impl PortHub {
             hub: hub.clone(),
             write_rx,
             log,
-            rx: LineSplitter::new(SplitMode::Rx),
-            tx: LineSplitter::new(SplitMode::Tx),
+            rx: LineSplitter::new(SplitMode::Rx, hub.config.encoding),
+            tx: LineSplitter::new(SplitMode::Tx, hub.config.encoding),
         };
         let handle = std::thread::Builder::new()
             .name(format!("port-{}", hub.config.name))

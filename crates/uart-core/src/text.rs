@@ -28,6 +28,7 @@ impl SplitMode {
 #[derive(Debug)]
 pub struct LineSplitter {
     mode: SplitMode,
+    encoding: Encoding,
     buf: Vec<u8>,
     last_data: Option<Instant>,
     /// TX 模式下，上一个字节是否是 `\r`（用来吞掉 `\r\n` 里的 `\n`）。
@@ -35,9 +36,10 @@ pub struct LineSplitter {
 }
 
 impl LineSplitter {
-    pub fn new(mode: SplitMode) -> Self {
+    pub fn new(mode: SplitMode, encoding: Encoding) -> Self {
         Self {
             mode,
+            encoding,
             buf: Vec::new(),
             last_data: None,
             prev_cr: false,
@@ -54,12 +56,13 @@ impl LineSplitter {
                 (SplitMode::Tx, b'\n') if self.prev_cr => {}
                 (SplitMode::Tx, b'\r' | b'\n') => lines.push(std::mem::take(&mut self.buf)),
                 (SplitMode::Tx, 0x08 | 0x7f) => {
-                    pop_char(&mut self.buf);
+                    let keep = last_char_start(&self.buf, self.encoding);
+                    self.buf.truncate(keep);
                 }
                 _ => {
                     self.buf.push(b);
                     if self.buf.len() >= MAX_LINE_BYTES {
-                        lines.push(std::mem::take(&mut self.buf));
+                        lines.push(self.split_complete());
                     }
                 }
             }
@@ -74,7 +77,12 @@ impl LineSplitter {
     /// 空闲超时后，把未结束的内容作为一行取出。
     pub fn poll_idle(&mut self, now: Instant) -> Option<Vec<u8>> {
         match self.deadline() {
-            Some(deadline) if now >= deadline => self.take(),
+            Some(deadline) if now >= deadline => {
+                let line = self.split_complete();
+                // 留下的残缺字符重新计时，等它的后续字节
+                self.last_data = Some(now);
+                Some(line)
+            }
             _ => None,
         }
     }
@@ -95,14 +103,76 @@ impl LineSplitter {
             Some(std::mem::take(&mut self.buf))
         }
     }
+
+    /// 取出缓冲中完整字符组成的部分；末尾不完整的多字节字符留到下一行开头，避免把字切成两半。
+    /// 缓冲里只有残缺字节时整体取出，不让它卡住。
+    fn split_complete(&mut self) -> Vec<u8> {
+        let end = complete_prefix(&self.buf, self.encoding);
+        if end == 0 {
+            return std::mem::take(&mut self.buf);
+        }
+        let tail = self.buf.split_off(end);
+        std::mem::replace(&mut self.buf, tail)
+    }
 }
 
-/// 退格：删掉最后一个字符（UTF-8 多字节字符整个删掉）。
-fn pop_char(buf: &mut Vec<u8>) {
-    while let Some(b) = buf.pop() {
-        // UTF-8 后续字节是 10xxxxxx，继续删到首字节为止。
-        if b & 0xC0 != 0x80 {
-            break;
+/// `buf` 中由完整字符组成的最长前缀的长度。
+fn complete_prefix(buf: &[u8], encoding: Encoding) -> usize {
+    match encoding {
+        Encoding::Utf8 => {
+            // 从末尾往前找最后一个首字节，看它需要的长度是否已经齐了。
+            for back in 1..=buf.len().min(4) {
+                let i = buf.len() - back;
+                let b = buf[i];
+                if b & 0xC0 == 0x80 {
+                    continue;
+                }
+                let need = match b {
+                    0xF0..=0xF7 => 4,
+                    0xE0..=0xEF => 3,
+                    0xC0..=0xDF => 2,
+                    _ => 1,
+                };
+                return if back >= need { buf.len() } else { i };
+            }
+            buf.len()
+        }
+        Encoding::Gbk => {
+            let mut i = 0;
+            while i < buf.len() {
+                let step = if buf[i] >= 0x81 { 2 } else { 1 };
+                if i + step > buf.len() {
+                    break;
+                }
+                i += step;
+            }
+            i
+        }
+    }
+}
+
+/// 最后一个字符的起始位置（退格时删除到这里）。
+fn last_char_start(buf: &[u8], encoding: Encoding) -> usize {
+    match encoding {
+        Encoding::Utf8 => {
+            let mut i = buf.len();
+            while i > 0 {
+                i -= 1;
+                // UTF-8 后续字节是 10xxxxxx，继续往前找到首字节为止。
+                if buf[i] & 0xC0 != 0x80 {
+                    break;
+                }
+            }
+            i
+        }
+        // GBK 的尾字节可能落在 ASCII 以外的任意区间，只能从头逐字符走。
+        Encoding::Gbk => {
+            let (mut i, mut last) = (0, 0);
+            while i < buf.len() {
+                last = i;
+                i += if buf[i] >= 0x81 { 2 } else { 1 };
+            }
+            last
         }
     }
 }
@@ -151,6 +221,8 @@ fn strip_ansi(raw: &[u8]) -> Vec<u8> {
                         i += 1;
                     }
                 }
+                // 字符集选择：ESC ( B 等，后面还跟一个字节
+                Some(b'(' | b')' | b'*' | b'+' | b'#') => i += 2,
                 Some(_) => i += 1,
                 None => {}
             }
@@ -189,7 +261,7 @@ mod tests {
 
     #[test]
     fn rx_splits_on_lf_and_drops_cr() {
-        let mut s = LineSplitter::new(SplitMode::Rx);
+        let mut s = LineSplitter::new(SplitMode::Rx, Encoding::Utf8);
         assert_eq!(feed_all(&mut s, b"hello\r\nwor"), vec!["hello"]);
         assert_eq!(feed_all(&mut s, b"ld\n\n"), vec!["world", ""]);
         assert!(s.take().is_none());
@@ -197,7 +269,7 @@ mod tests {
 
     #[test]
     fn rx_flushes_partial_line_after_idle() {
-        let mut s = LineSplitter::new(SplitMode::Rx);
+        let mut s = LineSplitter::new(SplitMode::Rx, Encoding::Utf8);
         let t0 = Instant::now();
         assert!(s.feed(b"login: ", t0).is_empty());
         assert_eq!(s.deadline(), Some(t0 + Duration::from_millis(100)));
@@ -208,7 +280,7 @@ mod tests {
 
     #[test]
     fn splits_overlong_line() {
-        let mut s = LineSplitter::new(SplitMode::Rx);
+        let mut s = LineSplitter::new(SplitMode::Rx, Encoding::Utf8);
         let lines = s.feed(&vec![b'a'; MAX_LINE_BYTES + 10], Instant::now());
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].len(), MAX_LINE_BYTES);
@@ -217,7 +289,7 @@ mod tests {
 
     #[test]
     fn tx_handles_cr_crlf_and_backspace() {
-        let mut s = LineSplitter::new(SplitMode::Tx);
+        let mut s = LineSplitter::new(SplitMode::Tx, Encoding::Utf8);
         // 终端逐字符输入，带一次退格
         let mut lines = Vec::new();
         for b in b"rebox\x7Fot\r" {
@@ -230,7 +302,7 @@ mod tests {
 
     #[test]
     fn backspace_removes_whole_utf8_char() {
-        let mut s = LineSplitter::new(SplitMode::Tx);
+        let mut s = LineSplitter::new(SplitMode::Tx, Encoding::Utf8);
         assert_eq!(feed_all(&mut s, "a中\x08b\r".as_bytes()), vec!["ab"]);
     }
 
@@ -244,6 +316,41 @@ mod tests {
     fn render_escapes_invalid_utf8() {
         assert_eq!(render_line(b"ok\xFF\xFEz", Encoding::Utf8), "ok\\xFF\\xFEz");
         assert_eq!(render_line("温度".as_bytes(), Encoding::Utf8), "温度");
+    }
+
+    #[test]
+    fn overlong_line_does_not_split_utf8_char() {
+        let mut s = LineSplitter::new(SplitMode::Rx, Encoding::Utf8);
+        let mut data = vec![b'a'; MAX_LINE_BYTES - 2];
+        data.extend_from_slice("中文".as_bytes());
+        let lines = s.feed(&data, Instant::now());
+        assert_eq!(lines[0].len(), MAX_LINE_BYTES - 2);
+        assert_eq!(s.take().unwrap(), "中文".as_bytes());
+    }
+
+    #[test]
+    fn idle_flush_keeps_incomplete_char() {
+        let mut s = LineSplitter::new(SplitMode::Rx, Encoding::Utf8);
+        let t0 = Instant::now();
+        s.feed(&[b'o', b'k', 0xE4, 0xB8], t0);
+        let t1 = t0 + Duration::from_millis(100);
+        assert_eq!(s.poll_idle(t1).unwrap(), b"ok");
+        assert!(s.poll_idle(t1 + Duration::from_millis(50)).is_none(), "残缺字符要重新计时");
+        assert_eq!(s.feed(&[0xAD, b'\n'], t1), vec!["中".as_bytes().to_vec()]);
+    }
+
+    #[test]
+    fn gbk_prefix_and_backspace() {
+        // "啊" = B0 A1：尾字节落在 0x80–0xBF，不能按 UTF-8 规则删
+        let mut s = LineSplitter::new(SplitMode::Tx, Encoding::Gbk);
+        let lines = s.feed(&[b'x', 0xB0, 0xA1, 0xB0, 0xA1, 0x08, 0x0D], Instant::now());
+        assert_eq!(lines, vec![vec![b'x', 0xB0, 0xA1]]);
+        assert_eq!(complete_prefix(&[b'a', 0xB0, 0xA1, 0xB0], Encoding::Gbk), 3);
+    }
+
+    #[test]
+    fn strips_charset_designation() {
+        assert_eq!(render_line(b"(B[mok", Encoding::Utf8), "ok");
     }
 
     #[test]
