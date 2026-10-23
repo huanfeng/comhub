@@ -1,4 +1,4 @@
-//! uartctl：uarttool 的命令行客户端，通过 HTTP 接口读取串口日志、向设备发送命令。
+//! comhub：ComHub 的命令行客户端，通过 HTTP 接口读取串口日志、向设备发送命令。
 
 mod local;
 
@@ -18,29 +18,29 @@ const AFTER_HELP: &str = "\
 退出码：0 成功；1 出错；2 参数错误；3 wait/send --expect 超时（期间收到的日志仍会输出）
 
 示例：
-  uartctl list                                      查看有哪些串口
-  uartctl devices --local                           列出本机串口及 USB 序列号（不需要服务）
-  uartctl tail esp32 -n 100                         最近 100 行日志
-  uartctl log esp32 --since 1520                    1520 之后的新日志（末行给出下次的 since）
-  uartctl grep esp32 \"(?i)error|panic\"              搜索最近的错误
-  uartctl send esp32 reboot --expect \"boot done\" --timeout 20
+  comhub list                                      查看有哪些串口
+  comhub devices --local                           列出本机串口及 USB 序列号（不需要服务）
+  comhub tail esp32 -n 100                         最近 100 行日志
+  comhub log esp32 --since 1520                    1520 之后的新日志（末行给出下次的 since）
+  comhub grep esp32 \"(?i)error|panic\"              搜索最近的错误
+  comhub send esp32 reboot --expect \"boot done\" --timeout 20
                                                     重启设备并等待启动完成
-  uartctl send esp32 '\\x03' --escape --eol none     发送 Ctrl+C
-  uartctl wait esp32 \"connected\" --timeout 60       等待某条日志出现
-  uartctl follow esp32                              持续输出（Ctrl+C 结束）";
+  comhub send esp32 '\\x03' --escape --eol none     发送 Ctrl+C
+  comhub wait esp32 \"connected\" --timeout 60       等待某条日志出现
+  comhub follow esp32                              持续输出（Ctrl+C 结束）";
 
 #[derive(Parser)]
 #[command(
     version,
-    about = "读取 uarttool 共享的串口日志、向设备发送命令",
+    about = "读取 ComHub 共享的串口日志、向设备发送命令",
     after_help = AFTER_HELP
 )]
 struct Cli {
-    /// uarttool 服务地址
-    #[arg(long, global = true, env = "UARTCTL_HOST", default_value = "127.0.0.1:7000")]
+    /// ComHub 服务地址
+    #[arg(long, global = true, env = "COMHUB_HOST", default_value = "127.0.0.1:7000")]
     host: String,
     /// 访问 token（服务配置了 token 时需要）
-    #[arg(long, global = true, env = "UARTCTL_TOKEN", hide_env_values = true)]
+    #[arg(long, global = true, env = "COMHUB_TOKEN", hide_env_values = true)]
     token: Option<String>,
     /// 输出 JSON 而不是文本
     #[arg(long, global = true)]
@@ -117,7 +117,7 @@ enum Command {
     Doc,
     /// 不启动界面，在前台运行串口共享服务（日志输出到控制台，Ctrl+C 退出）
     Serve {
-        /// 配置文件路径，默认 %APPDATA%\uarttool\config.toml
+        /// 配置文件路径，默认 %APPDATA%\comhub\config.toml
         #[arg(long, short)]
         config: Option<std::path::PathBuf>,
     },
@@ -131,7 +131,7 @@ fn main() -> ExitCode {
     match run(cli) {
         Ok(code) => code,
         Err(e) => {
-            eprintln!("uartctl: {e:#}");
+            eprintln!("comhub: {e:#}");
             ExitCode::from(1)
         }
     }
@@ -262,7 +262,7 @@ impl Client {
 
     /// 输出响应体，并把 HTTP 状态映射成退出码。
     fn finish(&self, response: Result<Response<Body>, ureq::Error>) -> Result<ExitCode> {
-        let mut response = response.with_context(|| format!("无法连接 uarttool 服务 {}", self.base))?;
+        let mut response = response.with_context(|| format!("无法连接 ComHub 服务 {}", self.base))?;
         let status = response.status().as_u16();
         let body = response.body_mut().read_to_string()?;
         match status {
@@ -282,7 +282,7 @@ impl Client {
         let response = self
             .get(&port_path(name, "stream"), None)
             .call()
-            .with_context(|| format!("无法连接 uarttool 服务 {}", self.base))?;
+            .with_context(|| format!("无法连接 ComHub 服务 {}", self.base))?;
         if !response.status().is_success() {
             return self.finish(Ok(response));
         }

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/uart-core", "crates/uarttool", "crates/uartctl"]
+members = ["crates/comhub-core", "crates/comhubw", "crates/comhub"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,7 +8,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-uart-core = { path = "crates/uart-core" }
+comhub-core = { path = "crates/comhub-core" }
 anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }

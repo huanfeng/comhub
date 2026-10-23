@@ -1,4 +1,4 @@
-//! HTTP 接口：给 AI、脚本和 uartctl 使用，默认返回纯文本。
+//! HTTP 接口：给 AI、脚本和 comhub 使用，默认返回纯文本。
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;

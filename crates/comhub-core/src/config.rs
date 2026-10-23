@@ -86,11 +86,11 @@ pub enum Encoding {
 }
 
 impl Config {
-    /// 默认配置文件路径：`%APPDATA%\uarttool\config.toml`。
+    /// 默认配置文件路径：`%APPDATA%\comhub\config.toml`。
     pub fn default_path() -> PathBuf {
         dirs::config_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join("uarttool")
+            .join("comhub")
             .join("config.toml")
     }
 

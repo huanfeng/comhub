@@ -355,6 +355,55 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d07550c9036bf2ae0c684c4297d503f838287c83c53686d05370d0e139ae570"
 
 [[package]]
+name = "comhub"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "comhub-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "ureq",
+]
+
+[[package]]
+name = "comhub-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "chrono",
+ "dirs",
+ "encoding_rs",
+ "futures-util",
+ "regex",
+ "serde",
+ "serde_json",
+ "serialport",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
+name = "comhubw"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "comhub-core",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "windui",
+ "winreg 0.55.0",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2195,55 +2244,6 @@ name = "ttf-parser"
 version = "0.25.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d2df906b07856748fa3f6e0ad0cbaa047052d4a7dd609e231c4f72cee8c36f31"
-
-[[package]]
-name = "uart-core"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "axum",
- "bytes",
- "chrono",
- "dirs",
- "encoding_rs",
- "futures-util",
- "regex",
- "serde",
- "serde_json",
- "serialport",
- "tempfile",
- "thiserror",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
-]
-
-[[package]]
-name = "uartctl"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uart-core",
- "ureq",
-]
-
-[[package]]
-name = "uarttool"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uart-core",
- "windui",
- "winreg 0.55.0",
-]
 
 [[package]]
 name = "unescaper"

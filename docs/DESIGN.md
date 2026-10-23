@@ -1,4 +1,4 @@
-# uarttool 设计文档
+# ComHub 设计文档
 
 把本机的多个串口通过局域网共享出去：本机的终端工具（WindTerm / XShell）、局域网内其它设备、
 以及 AI Agent 可以**同时**使用同一个串口。主要场景是设备调试时抓取日志。
@@ -11,7 +11,7 @@
 - 支持多个串口；用别名标识设备，并绑定 USB 序列号（COM 号变了也能认回设备）。
 - 支持热插拔：设备断开后自动重连，终端连接保持不断。
 - 每个串口一个固定的 Telnet / Raw TCP 端口，WindTerm、XShell 可以直接连接。
-- 面向 AI：纯文本日志文件 + 文本优先的 HTTP 接口 + `uartctl` 命令行工具。
+- 面向 AI：纯文本日志文件 + 文本优先的 HTTP 接口 + `comhub` 命令行工具。
 - GUI：基于 windui 的托盘常驻程序。
 
 **第一版不做**：在界面里调波特率、DTR/RTS 控制、RFC2217、虚拟 COM 口、内置日志查看器、
@@ -20,11 +20,11 @@
 ## 2. 架构
 
 ```
-uarttool.exe（托盘常驻；无界面运行用 `uartctl serve`）
+comhubw.exe（托盘常驻；无界面运行用 `comhub serve`）
 ├─ UI 线程：windui 事件循环（托盘 + 按需打开的主窗口）
 │      ▲ 事件回调（状态变化）→ App::channel
 │      ▼ 命令（新增/删除/重载串口）
-└─ 服务运行时（tokio，后台线程）—— crate `uart-core`
+└─ 服务运行时（tokio，后台线程）—— crate `comhub-core`
    ├─ PortManager：管理多个串口
    │   └─ 每个串口一个 PortHub
    │       ├─ 串口线程：查找设备 → 打开 → 阻塞读；出错就关闭并重新查找
@@ -35,7 +35,7 @@ uarttool.exe（托盘常驻；无界面运行用 `uartctl serve`）
    ├─ Terminal 服务：每个串口一个 TCP 端口（telnet / raw）
    └─ HTTP 服务：一个端口（默认 7000）
 
-uartctl.exe（控制台程序，只通过 HTTP 和服务通信）
+comhub.exe（控制台程序，只通过 HTTP 和服务通信）
 ```
 
 数据有两条路径：
@@ -60,7 +60,7 @@ uartctl.exe（控制台程序，只通过 HTTP 和服务通信）
 
 ## 4. 配置文件
 
-位置：`%APPDATA%\uarttool\config.toml`，可以用 `--config <path>` 指定其它路径。
+位置：`%APPDATA%\comhub\config.toml`，可以用 `--config <path>` 指定其它路径。
 
 ```toml
 [server]
@@ -90,7 +90,7 @@ enabled = true            # false 时保留配置但不打开串口
   让终端进入逐字符模式；发出的数据把 `0xFF` 转义为 `0xFF 0xFF`；收到的数据中去掉 IAC 命令，
   并把 `\r\0` 还原为 `\r`。
 - `raw` 模式：原样透传。
-- 连接建立时发送一行提示，例如 `[uarttool] esp32 (COM5, 115200) connected`。设备断开或重连时，
+- 连接建立时发送一行提示，例如 `[comhub] esp32 (COM5, 115200) connected`。设备断开或重连时，
   也向所有终端推送一行提示。
 
 ## 6. HTTP 接口
@@ -115,10 +115,10 @@ enabled = true            # false 时保留配置但不打开串口
   超时返回 HTTP 408，串口被停止返回 503，期间收到的行仍然放在响应体里。
 - `log` 的游标之后若有行已被挤出内存缓冲，响应开头会有一行 `-- gap: 第 X..Y 行…`（JSON 中为 `gap` 字段）。
 
-## 7. uartctl
+## 7. comhub
 
 ```
-uartctl [--host <addr>] [--token <t>] [--json] <命令>
+comhub [--host <addr>] [--token <t>] [--json] <命令>
   list                                  列出串口
   tail   <name> [-n 200]                最近 N 行
   log    <name> [--since <seq>]         增量读取（输出末尾会打印 next seq）
@@ -130,10 +130,10 @@ uartctl [--host <addr>] [--token <t>] [--json] <命令>
   serve  [--config <path>]              不启动界面，在前台运行服务
 ```
 
-uarttool 是 GUI 子系统程序，没有控制台输出，所以"列出串口""无界面运行服务"这类命令行功能放在
-uartctl（控制台程序）里。`serve` 与托盘程序共用同一份配置，两者不要同时运行。
+comhubw 是 GUI 子系统程序，没有控制台输出，所以"列出串口""无界面运行服务"这类命令行功能放在
+comhub（控制台程序）里。`serve` 与托盘程序共用同一份配置，两者不要同时运行。
 
-`--host` 默认是 `127.0.0.1:7000`，也可以用环境变量 `UARTCTL_HOST` 指定。
+`--host` 默认是 `127.0.0.1:7000`，也可以用环境变量 `COMHUB_HOST` 指定。
 
 ## 8. 里程碑
 
@@ -141,6 +141,6 @@ uartctl（控制台程序）里。`serve` 与托盘程序共用同一份配置�
 |---|---|
 | M1 | 配置、PortHub、行切分、环形缓冲、日志文件、热插拔、无界面运行 |
 | M2 | Terminal 服务（telnet / raw） |
-| M3 | HTTP 接口、`uartctl`、AI 使用说明 |
+| M3 | HTTP 接口、`comhub`、AI 使用说明 |
 | M4 | windui 托盘 GUI、开机自启 |
 | M5 | 波特率 / DTR / RTS、RFC2217、mDNS、内置日志查看器 |

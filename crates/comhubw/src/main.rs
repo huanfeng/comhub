@@ -1,4 +1,4 @@
-// release 构建不弹控制台窗口。命令行功能（列出串口、无界面运行服务）在 uartctl 里。
+// release 构建不弹控制台窗口。命令行功能（列出串口、无界面运行服务）在 comhub 里。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autostart;
@@ -11,13 +11,13 @@ use std::sync::Mutex;
 
 use anyhow::Result;
 use clap::Parser;
-use uart_core::config::Config;
-use uart_core::service::Service;
+use comhub_core::config::Config;
+use comhub_core::service::Service;
 
 #[derive(Parser)]
 #[command(version, about = "把本机串口通过局域网共享给终端和 AI（托盘程序）")]
 struct Args {
-    /// 配置文件路径，默认 %APPDATA%\uarttool\config.toml
+    /// 配置文件路径，默认 %APPDATA%\comhub\config.toml
     #[arg(long, short)]
     config: Option<PathBuf>,
     /// 开机自启时使用：只显示托盘图标，不打开主窗口
@@ -62,9 +62,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// GUI 程序没有控制台，日志写到配置文件旁边的 uarttool.log。
+/// GUI 程序没有控制台，日志写到配置文件旁边的 comhub.log。
 fn init_file_log(config_path: &Path) {
-    let path = config_path.with_file_name("uarttool.log");
+    let path = config_path.with_file_name("comhub.log");
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }

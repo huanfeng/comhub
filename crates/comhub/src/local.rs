@@ -3,12 +3,12 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use uart_core::config::Config;
-use uart_core::service::Service;
+use comhub_core::config::Config;
+use comhub_core::service::Service;
 
 pub fn print_devices() {
     println!("{:<8} {:<10} {:<20} DESCRIPTION", "COM", "VID:PID", "SERIAL");
-    for d in uart_core::devices::list_devices() {
+    for d in comhub_core::devices::list_devices() {
         let vid_pid = match (d.vid, d.pid) {
             (Some(v), Some(p)) => format!("{v:04X}:{p:04X}"),
             _ => "-".into(),

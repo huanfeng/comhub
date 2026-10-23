@@ -10,16 +10,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use uart_core::config::{Config, Encoding, PortConfig, TerminalMode};
-use uart_core::devices;
-use uart_core::port::{PortSnapshot, PortState};
-use uart_core::service::Service;
+use comhub_core::config::{Config, Encoding, PortConfig, TerminalMode};
+use comhub_core::devices;
+use comhub_core::port::{PortSnapshot, PortState};
+use comhub_core::service::Service;
 use windui::prelude::*;
 
 use crate::{autostart, icon};
 
 /// 单实例标识，`main` 里的提前仲裁与 `App::single_instance` 必须一致。
-pub const APP_ID: &str = "uarttool";
+pub const APP_ID: &str = "comhub";
 const MODES: [&str; 2] = ["telnet", "raw"];
 const ENCODINGS: [&str; 2] = ["utf-8", "gbk"];
 /// 对话框（宽 520）里表单控件的宽度：长字段与短字段。
@@ -70,7 +70,7 @@ pub fn run(
         })
         .menu(tray_menu(&gui));
 
-    let mut app = App::resident("uarttool")
+    let mut app = App::resident("ComHub")
         .icon(IconSource::sized(|size| icon::render(size, None)))
         .tray(tray);
     let tray_handle = app.tray_handle();
@@ -119,7 +119,7 @@ fn tray_menu(gui: &Gui) -> Vec<TrayMenuItem> {
     let open = move |ctx: &mut TrayCtx| ctx.open_window(g.main_window());
     let g = gui.clone();
     let reload = move |ctx: &mut TrayCtx| match g.reload_from_file() {
-        Ok(()) => ctx.notify("uarttool", "已重新加载配置"),
+        Ok(()) => ctx.notify("ComHub", "已重新加载配置"),
         Err(e) => ctx.notify("重新加载配置失败", &format!("{e:#}")),
     };
     let g = gui.clone();
@@ -175,7 +175,7 @@ impl Gui {
         if self.summary.get() != summary {
             self.summary.set(summary);
         }
-        let tooltip = format!("uarttool — {online}/{} 个串口在线", config.ports.len());
+        let tooltip = format!("ComHub — {online}/{} 个串口在线", config.ports.len());
         (tooltip, online > 0)
     }
 
@@ -232,7 +232,7 @@ impl Gui {
 
     fn main_window(&self) -> WindowRequest {
         let gui = self.clone();
-        Window::new("uarttool", 900, 520)
+        Window::new("ComHub", 900, 520)
             .single("main")
             .centered(true)
             .min_size(720, 360)

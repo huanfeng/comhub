@@ -1,11 +1,11 @@
 [package]
-name = "uarttool"
+name = "comhubw"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-uart-core.workspace = true
+comhub-core.workspace = true
 anyhow.workspace = true
 tokio.workspace = true
 tracing.workspace = true

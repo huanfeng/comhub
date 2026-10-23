@@ -5,7 +5,7 @@ use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use winreg::RegKey;
 
 const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const VALUE_NAME: &str = "uarttool";
+const VALUE_NAME: &str = "comhub";
 /// 自启动时带上这个参数：只显示托盘，不弹主窗口。
 pub const AUTOSTART_ARG: &str = "--autostart";
 

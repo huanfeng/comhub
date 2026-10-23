@@ -1,6 +1,6 @@
-# uarttool HTTP 接口
+# ComHub HTTP 接口
 
-uarttool 把本机串口共享到网络上。通过这个接口可以读取设备日志、向设备发送命令。
+ComHub 把本机串口共享到网络上。通过这个接口可以读取设备日志、向设备发送命令。
 所有接口默认返回纯文本；加 `format=json` 返回 JSON。下面示例中的 `{base}` 是本服务地址。
 
 ## 日志行格式
@@ -43,4 +43,4 @@ curl -X POST --data "reboot" "{base}/ports/esp32/send?expect=boot%20done&timeout
 curl -N {base}/ports/esp32/stream
 ```
 
-如果本机有 `uartctl` 命令行工具，用法更简单，见 `uartctl --help`。
+如果本机有 `comhub` 命令行工具，用法更简单，见 `comhub --help`。

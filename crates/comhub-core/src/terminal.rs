@@ -158,7 +158,7 @@ fn banner(hub: &PortHub) -> String {
 ///
 /// 按串口的编码输出：终端的编码是按设备输出设置的（例如 XShell 默认 GBK），提示要和它一致。
 fn notice(text: &str, encoding: Encoding) -> Vec<u8> {
-    let line = format!("\r\n[uarttool] {text}\r\n");
+    let line = format!("\r\n[comhub] {text}\r\n");
     match encoding {
         Encoding::Utf8 => line.into_bytes(),
         Encoding::Gbk => encoding_rs::GBK.encode(&line).0.into_owned(),
