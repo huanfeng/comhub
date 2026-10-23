@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 
 use crate::config::{Config, PortConfig};
 use crate::port::{PortHub, PortSnapshot};
+use crate::terminal;
 
 /// 通知外部（例如 GUI）刷新显示。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,8 +125,8 @@ impl Service {
         }
     }
 
-    fn spawn_port_tasks(&self, _config: &Config, _hub: &Arc<PortHub>) -> Vec<JoinHandle<()>> {
-        Vec::new()
+    fn spawn_port_tasks(&self, config: &Config, hub: &Arc<PortHub>) -> Vec<JoinHandle<()>> {
+        vec![tokio::spawn(terminal::serve(hub.clone(), config.server.bind.clone()))]
     }
 
     /// 停止所有串口。
