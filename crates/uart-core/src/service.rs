@@ -177,3 +177,63 @@ fn warn_if_exposed(config: &Config) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Encoding, ServerConfig, TerminalMode};
+
+    fn port(name: &str, tcp_port: u16, baud: u32) -> PortConfig {
+        PortConfig {
+            name: name.into(),
+            serial_number: None,
+            // 不存在的串口：服务会一直处于等待状态，测试不依赖硬件
+            com: Some("COM250".into()),
+            baud,
+            tcp_port,
+            mode: TerminalMode::Telnet,
+            encoding: Encoding::Utf8,
+            enabled: true,
+        }
+    }
+
+    fn config(ports: Vec<PortConfig>) -> Config {
+        Config {
+            server: ServerConfig {
+                bind: "127.0.0.1".into(),
+                http_port: 47100,
+                ..ServerConfig::default()
+            },
+            ports,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reload_keeps_unchanged_ports_and_restarts_changed_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let service = Service::start(config(vec![port("a", 47101, 115_200)]), &path, |_| {}).unwrap();
+        let a = service.port("a").unwrap();
+
+        service
+            .reload(config(vec![port("a", 47101, 115_200), port("b", 47102, 115_200)]))
+            .unwrap();
+        assert!(Arc::ptr_eq(&a, &service.port("A").unwrap()), "未变化的串口应保持运行");
+        let b = service.port("b").unwrap();
+
+        service.reload(config(vec![port("b", 47102, 921_600)])).unwrap();
+        assert!(service.port("a").is_none(), "删除的串口应停止");
+        let b2 = service.port("b").unwrap();
+        assert!(!Arc::ptr_eq(&b, &b2), "配置变化的串口应重新创建");
+        assert_eq!(b2.config().baud, 921_600);
+        assert!(*b.closed().borrow(), "旧的串口应发出关闭信号");
+
+        let mut disabled = port("b", 47102, 921_600);
+        disabled.enabled = false;
+        service.reload(config(vec![disabled])).unwrap();
+        assert!(service.ports().is_empty(), "停用的串口不应运行");
+
+        assert!(service.reload(config(vec![port("x", 47100, 1)])).is_err(), "与 HTTP 端口冲突应拒绝");
+        service.shutdown();
+    }
+}
