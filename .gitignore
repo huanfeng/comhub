@@ -1,0 +1,5 @@
+/target
+*.log
+.remember/
+.omc/
+.claude/settings.local.json
