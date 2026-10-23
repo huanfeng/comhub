@@ -11,5 +11,5 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 clap.workspace = true
-windui = "0.28"
+windui = "0.29"
 winreg = "0.55"

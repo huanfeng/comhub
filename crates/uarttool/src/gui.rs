@@ -20,14 +20,17 @@ use crate::{autostart, icon};
 
 /// 单实例标识，`main` 里的提前仲裁与 `App::single_instance` 必须一致。
 pub const APP_ID: &str = "uarttool";
-const DANGER: u32 = 0xDC2626;
-/// 表格行里放了 `.small()` 按钮，行高按「按钮高 + 上下内边距」算。
-const ROW_H: i32 = 49;
 const MODES: [&str; 2] = ["telnet", "raw"];
 const ENCODINGS: [&str; 2] = ["utf-8", "gbk"];
 /// 对话框（宽 520）里表单控件的宽度：长字段与短字段。
 const FIELD_W: i32 = 340;
 const SHORT_W: i32 = 160;
+
+/// 表格行里放了 `.small()` 按钮：`TABLE_ROW_H` 是按单行文字（20px）算的，换成小号控件的高度。
+fn table_row_h() -> i32 {
+    const TEXT_LINE_H: i32 = 20;
+    TABLE_ROW_H - TEXT_LINE_H + windui::theme::current().metrics.control_h_sm
+}
 
 #[derive(Clone)]
 struct Gui {
@@ -238,15 +241,15 @@ impl Gui {
     }
 
     fn main_view(&self) -> Element {
+        let metrics = windui::theme::current().metrics.clone();
         let editor = Editor::new(self.clone());
         let confirm = Confirm::new(self.clone());
         let load_error = self.load_error;
         let load_error_text = load_error.map(|e| format!("配置文件解析失败，修正后点「重新加载配置」：{e}"));
 
-        let header = Element::row()
+        let header = Element::hstack()
             .width_match()
-            .spacing(8)
-            .child(Element::label("串口共享").font_size(20.0).height(32))
+            .child(Element::label("串口共享").font_size(metrics.font_xl))
             .child(Element::flex_spacer())
             .child(Element::button("添加串口").small().on_click({
                 let editor = editor.clone();
@@ -272,7 +275,7 @@ impl Gui {
                 ("发送", 0.8),
             ],
             rows,
-            ROW_H,
+            table_row_h(),
         )
         .actions("操作", 1.3, {
             let editor = editor.clone();
@@ -282,8 +285,7 @@ impl Gui {
                 let editor = editor.clone();
                 let confirm = confirm.clone();
                 let edit_name = name.clone();
-                Element::row()
-                    .spacing(6)
+                Element::hstack()
                     .child(
                         Element::button("编辑")
                             .small()
@@ -307,9 +309,8 @@ impl Gui {
             .width_match()
             .visible_when(move || rows.with(|r| r.is_empty()));
 
-        let footer = Element::row()
+        let footer = Element::hstack()
             .width_match()
-            .spacing(8)
             .child(Element::button("复制 HTTP 地址").small().outline().neutral().on_click({
                 let gui = self.clone();
                 move |ctx| {
@@ -340,15 +341,14 @@ impl Gui {
         Element::stack()
             .fill()
             .child(
-                Element::col()
+                Element::vstack()
                     .fill()
-                    .padding(16)
-                    .spacing(10)
+                    .padding(metrics.space_lg)
                     .child(header)
                     .child(Element::label_signal(self.summary).fg_role(Role::TextMuted).width_match())
                     .child(
                         Element::label_signal(load_error_text)
-                            .fg(Color::hex(DANGER))
+                            .fg_role(Role::Danger)
                             .width_match()
                             .visible_when(move || load_error.with(|e| !e.is_empty())),
                     )
@@ -595,7 +595,7 @@ impl Editor {
 
         let body = Element::col()
             .width_match()
-            .spacing(8)
+            .spacing(windui::theme::current().metrics.space_sm)
             .child(Element::field("名称", Element::text_input(self.name, "例如 esp32").width(FIELD_W)))
             .child(Element::field(
                 "设备",
@@ -608,15 +608,14 @@ impl Editor {
             .child(Element::field("启用", Element::switch(self.enabled)))
             .child(
                 Element::label_signal(error)
-                    .fg(Color::hex(DANGER))
+                    .fg_role(Role::Danger)
                     .width_match()
                     .visible_when(move || error.with(|e| !e.is_empty())),
             );
 
         let editor = self.clone();
-        let footer = Element::row()
+        let footer = Element::hstack()
             .width_match()
-            .spacing(8)
             .child(Element::flex_spacer())
             .child(
                 Element::button("取消")
@@ -666,9 +665,8 @@ impl Confirm {
     fn view(&self) -> Element {
         let show = self.show;
         let this = self.clone();
-        let footer = Element::row()
+        let footer = Element::hstack()
             .width_match()
-            .spacing(8)
             .child(Element::flex_spacer())
             .child(
                 Element::button("取消")
