@@ -34,6 +34,8 @@ pub struct Service {
     config_path: PathBuf,
     ports: Mutex<BTreeMap<String, PortEntry>>,
     http: Mutex<Option<HttpServer>>,
+    /// 已停止的串口留下的缓冲与线程句柄，按别名索引，供同名串口再次启动时接手
+    retired: Mutex<BTreeMap<String, Handover>>,
     on_event: EventSink,
 }
 
@@ -50,6 +52,7 @@ impl Service {
             config_path: config_path.to_path_buf(),
             ports: Mutex::new(BTreeMap::new()),
             http: Mutex::new(None),
+            retired: Mutex::new(BTreeMap::new()),
             on_event: Arc::new(on_event),
         });
         service.apply(None, config);
@@ -131,12 +134,14 @@ impl Service {
                 .collect();
             names.iter().filter_map(|n| ports.remove(n)).collect()
         };
-        let mut handovers: BTreeMap<String, Handover> = BTreeMap::new();
+        // 停下的串口留下缓冲和线程句柄：同名串口（这次重建，或以后停用后再启用、删掉后再加回）
+        // 接着用同一份缓冲，seq 连续；并先等旧线程关闭串口再打开，避免"拒绝访问"。
+        let mut retired = self.retired.lock().unwrap();
         for entry in stale {
             entry.terminal.abort();
-            // 不等待旧线程：同名串口的新线程会自己等它，删掉的串口让它自行退出。
+            // 不在这里等待旧线程，由同名的新线程自己等。
             let predecessor = entry.hub.request_stop();
-            handovers.insert(
+            retired.insert(
                 entry.hub.name().to_string(),
                 Handover { buffer: Some(entry.hub.buffer_handle()), predecessor },
             );
@@ -151,7 +156,7 @@ impl Service {
                 continue;
             }
             let on_event = self.on_event.clone();
-            let handover = handovers.remove(&name).unwrap_or_default();
+            let handover = retired.remove(&name).unwrap_or_default();
             let hub = PortHub::start(port_config, server.buffer_lines, &log_root, handover, move |n| {
                 on_event(ServiceEvent::PortChanged(n.to_string()))
             });
@@ -173,7 +178,9 @@ impl Service {
                 entry.hub.request_stop()
             })
             .collect();
-        for handle in handles {
+        let retired = std::mem::take(&mut *self.retired.lock().unwrap());
+        let retired_handles = retired.into_values().filter_map(|h| h.predecessor);
+        for handle in handles.into_iter().chain(retired_handles) {
             let _ = handle.join();
         }
     }
@@ -273,6 +280,11 @@ mod tests {
         disabled.enabled = false;
         service.reload(config(vec![disabled])).unwrap();
         assert!(service.ports().is_empty(), "停用的串口不应运行");
+
+        // 停用后再启用：接着用原来的缓冲
+        service.reload(config(vec![port("b", 47102, 921_600)])).unwrap();
+        let b3 = service.port("b").unwrap();
+        assert!(Arc::ptr_eq(&b2.buffer_handle(), &b3.buffer_handle()), "重新启用应沿用旧缓冲");
 
         assert!(service.reload(config(vec![port("x", 47100, 1)])).is_err(), "与 HTTP 端口冲突应拒绝");
 

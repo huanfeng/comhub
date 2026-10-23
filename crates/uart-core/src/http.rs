@@ -359,8 +359,10 @@ async fn wait(
 ) -> ApiResult {
     let hub = find_port(&service, &name)?;
     let re = parse_regex(params.pattern.as_deref(), "pattern")?;
+    let baseline = hub.with_buffer(|b| b.last_seq());
     let mut rx = hub.subscribe_lines();
-    let (lines, end) = collect_until(&hub, &mut rx, &re, params.any_dir(), params.timeout(30.0)).await;
+    let (lines, end) =
+        collect_until(&hub, &mut rx, &re, params.any_dir(), params.timeout(30.0), baseline).await;
     Ok(wait_response(&lines, end, &params))
 }
 
@@ -394,7 +396,8 @@ async fn send(
         ));
     }
 
-    // 先订阅再写入，避免设备回复得太快而漏掉。
+    // 先取基准、再订阅、最后写入，避免设备回复得太快而漏掉。
+    let baseline = hub.with_buffer(|b| b.last_seq());
     let mut rx = hub.subscribe_lines();
     let mut data = body.to_vec();
     data.extend_from_slice(eol);
@@ -403,7 +406,8 @@ async fn send(
 
     match expect {
         Some(re) => {
-            let (lines, end) = collect_until(&hub, &mut rx, &re, params.any_dir(), params.timeout(5.0)).await;
+            let (lines, end) =
+                collect_until(&hub, &mut rx, &re, params.any_dir(), params.timeout(5.0), baseline).await;
             Ok(wait_response(&lines, end, &params))
         }
         None if params.json() => Ok(json(&serde_json::json!({ "sent": len }))),
@@ -454,16 +458,18 @@ enum WaitEnd {
 /// 默认只拿设备输出（RX）去匹配：发出去的命令本身（TX）常常包含要等的关键字，
 /// 比如 `send reboot --expect boot`。`any_dir` 为真时 TX/SYS 行也参与匹配。
 /// 返回的行包含所有方向，方便看清上下文。
+///
+/// `last_seen` 是开始等待时缓冲中最新的 seq，必须在订阅广播**之前**读取：之后的行既会从广播收到，
+/// 也会在积压补齐时按 seq 去重，不会被误当成旧行跳过。
 async fn collect_until(
     hub: &PortHub,
     rx: &mut broadcast::Receiver<LogLine>,
     re: &Regex,
     any_dir: bool,
     timeout: Duration,
+    mut last_seen: u64,
 ) -> (Vec<LogLine>, WaitEnd) {
     let mut closed = hub.closed();
-    // 已处理到的 seq：广播积压（Lagged）时从环形缓冲补齐，并据此去重。
-    let mut last_seen = hub.with_buffer(|b| b.last_seq());
     let mut lines = VecDeque::new();
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -474,7 +480,8 @@ async fn collect_until(
         let batch = match received {
             Err(_) => return (lines.into(), WaitEnd::Timeout),
             Ok(Err(RecvError::Closed)) => return (lines.into(), WaitEnd::Closed),
-            Ok(Err(RecvError::Lagged(_))) => hub.with_buffer(|b| b.since(last_seen, MAX_WAIT_LINES)),
+            // 积压时一次补齐到缓冲里最新的一行，中间的行都参与匹配（返回的行仍只保留最近 MAX_WAIT_LINES 条）
+            Ok(Err(RecvError::Lagged(_))) => hub.with_buffer(|b| b.since(last_seen, usize::MAX)),
             Ok(Ok(line)) => vec![line],
         };
         for line in batch {

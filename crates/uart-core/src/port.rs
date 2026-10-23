@@ -130,6 +130,7 @@ impl PortHub {
             rx: LineSplitter::new(SplitMode::Rx, hub.config.encoding),
             tx: LineSplitter::new(SplitMode::Tx, hub.config.encoding),
             predecessor: handover.predecessor,
+            pending: Vec::new(),
             dropped: 0,
             last_drop_notice: None,
         };
@@ -255,6 +256,8 @@ struct Worker {
     rx: LineSplitter,
     tx: LineSplitter,
     predecessor: Option<JoinHandle<()>>,
+    /// 已连接时等待写出的数据（写超时或部分写入时留到下一轮）
+    pending: Vec<u8>,
     /// 未连接期间累计丢弃、尚未提示的写入字节数
     dropped: usize,
     last_drop_notice: Option<Instant>,
@@ -288,12 +291,19 @@ impl Worker {
                 Ok(port) => {
                     announced_waiting = false;
                     last_error = None;
+                    // 断开期间还没来得及提示的丢弃字节，在连接前报出来，不要算到下一次断开头上
+                    self.report_dropped();
                     self.hub.set_state(PortState::Connected { com: device.com.clone() });
                     self.sys(format!(
                         "已连接 {}（{} 8N1）",
                         device.com, self.hub.config.baud
                     ));
                     let reason = self.serve(port, &device.com);
+                    if !self.pending.is_empty() {
+                        let n = self.pending.len();
+                        self.pending.clear();
+                        self.sys(format!("断开时有 {n} 字节没来得及写出，已丢弃"));
+                    }
                     self.flush_partial();
                     if self.stopped() {
                         break;
@@ -319,7 +329,6 @@ impl Worker {
     /// 已连接状态下的读写循环；返回断开的原因。
     fn serve(&mut self, mut port: Box<dyn SerialPort>, com: &str) -> String {
         let mut buf = vec![0u8; 4096];
-        let mut pending: Vec<u8> = Vec::new();
         let mut last_presence_check = Instant::now();
         loop {
             if self.stopped() {
@@ -333,16 +342,16 @@ impl Worker {
             }
 
             // 写超时（低波特率或驱动发送缓冲满）不是断开：没写完的留到下一轮继续写。
-            while pending.len() < MAX_PENDING_WRITE {
+            while self.pending.len() < MAX_PENDING_WRITE {
                 match self.write_rx.try_recv() {
-                    Ok(data) => pending.extend_from_slice(&data),
+                    Ok(data) => self.pending.extend_from_slice(&data),
                     Err(_) => break,
                 }
             }
-            if !pending.is_empty() {
-                match port.write(&pending) {
+            if !self.pending.is_empty() {
+                match port.write(&self.pending) {
                     Ok(n) => {
-                        let written: Vec<u8> = pending.drain(..n).collect();
+                        let written: Vec<u8> = self.pending.drain(..n).collect();
                         self.on_tx(&written);
                     }
                     Err(e) if matches!(e.kind(), ErrorKind::TimedOut | ErrorKind::Interrupted) => {}
@@ -421,12 +430,18 @@ impl Worker {
             let due = self
                 .last_drop_notice
                 .is_none_or(|t| t.elapsed() >= DROP_NOTICE_INTERVAL);
-            if self.dropped > 0 && due {
-                self.sys(format!("设备未连接，丢弃 {} 字节写入", self.dropped));
-                self.dropped = 0;
-                self.last_drop_notice = Some(Instant::now());
+            if due {
+                self.report_dropped();
             }
             std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    fn report_dropped(&mut self) {
+        if self.dropped > 0 {
+            self.sys(format!("设备未连接，丢弃 {} 字节写入", self.dropped));
+            self.dropped = 0;
+            self.last_drop_notice = Some(Instant::now());
         }
     }
 
