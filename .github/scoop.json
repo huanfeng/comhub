@@ -1,0 +1,7 @@
+{
+  "name": "comhub",
+  "bin": "comhub.exe,comhubw.exe",
+  "description": "Share local serial ports over the LAN with terminals and AI (tray app + CLI)",
+  "homepage": "https://github.com/huanfeng/comhub",
+  "license": "MIT OR Apache-2.0"
+}
