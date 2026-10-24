@@ -22,6 +22,11 @@ use crate::{autostart, icon};
 pub const APP_ID: &str = "comhub";
 const MODES: [&str; 2] = ["telnet", "raw"];
 const ENCODINGS: [&str; 2] = ["utf-8", "gbk"];
+/// 波特率下拉候选：常见档位，框里也能直接敲别的值（组合框不预选、不校验选项）。
+const BAUD_RATES: [&str; 16] = [
+    "300", "600", "1200", "2400", "4800", "9600", "19200", "38400", "57600", "115200", "230400",
+    "460800", "921600", "1000000", "1500000", "2000000",
+];
 /// 对话框（宽 520）里表单控件的宽度：长字段与短字段。
 const FIELD_W: i32 = 340;
 const SHORT_W: i32 = 160;
@@ -601,7 +606,14 @@ impl Editor {
                 "设备",
                 Element::dropdown_signal(self.device_labels, self.device).width(FIELD_W),
             ))
-            .child(Element::field("波特率", Element::text_input(self.baud, "115200").width(SHORT_W)))
+            // 组合框：常用档位现选，也能直接敲别的值；选中档位后全选，方便整体换成另一个。
+            .child(Element::field(
+                "波特率",
+                Element::combo_box(self.baud, BAUD_RATES.to_vec())
+                    .numeric()
+                    .select_all_on_pick()
+                    .width(SHORT_W),
+            ))
             .child(Element::field("TCP 端口", Element::text_input(self.tcp_port, "7001").width(SHORT_W)))
             .child(Element::field("终端模式", Element::dropdown(MODES.to_vec(), self.mode).width(SHORT_W)))
             .child(Element::field("编码", Element::dropdown(ENCODINGS.to_vec(), self.encoding).width(SHORT_W)))
