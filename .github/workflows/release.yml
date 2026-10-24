@@ -50,8 +50,10 @@ jobs:
           "version=$tag" >> $env:GITHUB_OUTPUT
           Write-Output "版本: $tag"
 
+      # 用 debug 跑测试：release 档开着 lto + codegen-units=1，在 CI 上光是编测试
+      # 就要多花十几分钟，而 CI 每次 push 已经跑过同一批测试了。
       - name: Test
-        run: cargo test --release --locked
+        run: cargo test --locked
 
       - name: Build
         run: cargo build --release --locked --bins
