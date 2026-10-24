@@ -5,9 +5,9 @@ on:
     tags:
       - "v*"
 
-# 新建 Release 需要写权限，新版 GitHub 默认只给只读
+# 默认只读；写权限只给真正要建 Release 的那个 job
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -16,6 +16,8 @@ jobs:
   release:
     name: Build and release
     runs-on: windows-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -26,11 +28,19 @@ jobs:
       # 版本号只有一处：根 Cargo.toml 的 [workspace.package].version（各成员都是
       # version.workspace = true）。这里只校验不改写——发出去的包版本号必须和 tag
       # 对得上，宁可在这里拦住。
+      #
+      # tag 名经 env 传入、不拼进脚本正文：`${{ github.ref_name }}` 直接写进 run:
+      # 时，一个精心构造的 tag 名就是一段要在 runner 上执行的代码。
       - name: Check tag matches Cargo.toml
         id: version
         shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
         run: |
-          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $tag = $env:TAG -replace '^v', ''
+          if ($tag -notmatch '^\d+\.\d+\.\d+$') {
+            throw "tag ($tag) 不是 v<major>.<minor>.<patch> 形式"
+          }
           $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
           $pkg = $meta.packages | Where-Object { $_.name -eq 'comhub' } | Select-Object -First 1
           if (-not $pkg) { throw "cargo metadata 里找不到包 comhub" }
@@ -48,8 +58,10 @@ jobs:
 
       - name: Package
         shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $ver = "${{ steps.version.outputs.version }}"
+          $ver = $env:VERSION
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           # 压缩包里**不套一层目录**。scoop 是直接解压到应用目录的，多一层壳就得靠
           # 清单里的 extract_dir，而那个值带版本号——自动更新的清单维护不了它。
@@ -69,35 +81,44 @@ jobs:
   notify-scoop-bucket:
     needs: release
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v7
         with:
           sparse-checkout: .github/scoop.json
           sparse-checkout-cone-mode: false
 
-      - name: Read scoop.json
-        id: scoop
-        run: |
-          set -euo pipefail
-          for key in name bin description homepage license; do
-            echo "$key=$(jq -er ".$key" .github/scoop.json)" >> "$GITHUB_OUTPUT"
-          done
-
       - name: Send repository_dispatch to scoop-bucket
         env:
           VERSION: ${{ needs.release.outputs.version }}
-          APP: ${{ steps.scoop.outputs.name }}
-          ASSET_NAME: "${{ steps.scoop.outputs.name }}-${{ needs.release.outputs.version }}-windows-x86_64.zip"
+          REPO: ${{ github.repository }}
           # 两个名字都认：本仓库用 SCOOP_BUCKET_GITHUB_TOKEN（与 apkhub 一致），
           # 姊妹项目 keyremap 用的是 SCOOP_TOKEN。少一个二选一的配置步骤。
           TOKEN: ${{ secrets.SCOOP_BUCKET_GITHUB_TOKEN || secrets.SCOOP_TOKEN }}
         run: |
           set -euo pipefail
+
+          # 清单元数据就地读，不经由 step output 再拼回脚本正文
+          APP=$(jq -er '.name' .github/scoop.json)
+          BIN=$(jq -er '.bin' .github/scoop.json)
+          DESCRIPTION=$(jq -er '.description' .github/scoop.json)
+          HOMEPAGE=$(jq -er '.homepage' .github/scoop.json)
+          LICENSE=$(jq -er '.license' .github/scoop.json)
+
+          # app 会进资产文件名与清单文件名，收紧到文件名安全的字符
+          if ! [[ "$APP" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+            echo "::error::scoop.json 的 name 只能是小写字母、数字和连字符: $APP"
+            exit 1
+          fi
+
           # 先明说缺什么。否则空 token 只会换来一个 401，看不出是没配 secret
           if [ -z "$TOKEN" ]; then
             echo "::error::未配置 secret SCOOP_BUCKET_GITHUB_TOKEN (或 SCOOP_TOKEN)，需要一个对 huanfeng/scoop-bucket 有 contents:write 权限的 PAT"
             exit 1
           fi
+
+          ASSET_NAME="$APP-$VERSION-windows-x86_64.zip"
           curl -fsSL \
             -X POST \
             -H "Accept: application/vnd.github+json" \
@@ -105,13 +126,13 @@ jobs:
             "https://api.github.com/repos/huanfeng/scoop-bucket/dispatches" \
             -d "$(jq -n \
               --arg app "$APP" \
-              --arg repo "${{ github.repository }}" \
+              --arg repo "$REPO" \
               --arg version "$VERSION" \
               --arg asset_name "$ASSET_NAME" \
-              --arg bin "${{ steps.scoop.outputs.bin }}" \
-              --arg description "${{ steps.scoop.outputs.description }}" \
-              --arg homepage "${{ steps.scoop.outputs.homepage }}" \
-              --arg license "${{ steps.scoop.outputs.license }}" \
+              --arg bin "$BIN" \
+              --arg description "$DESCRIPTION" \
+              --arg homepage "$HOMEPAGE" \
+              --arg license "$LICENSE" \
               '{
                 event_type: "update-scoop-manifest",
                 client_payload: {
