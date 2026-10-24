@@ -9,6 +9,18 @@
 
 设计见 [docs/DESIGN.md](docs/DESIGN.md)，AI 接入见 [docs/AI.md](docs/AI.md)。
 
+## 安装
+
+Windows 上用 [Scoop](https://scoop.sh)：
+
+```sh
+scoop bucket add huanfeng https://github.com/huanfeng/scoop-bucket
+scoop install comhub
+```
+
+装完后 `comhubw`（托盘程序）和 `comhub`（命令行）都在 PATH 上。也可以直接从
+[Releases](https://github.com/huanfeng/comhub/releases) 下载 zip 解压使用。
+
 ## 构建
 
 ```sh
